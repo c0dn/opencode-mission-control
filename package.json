@@ -1,0 +1,35 @@
+{
+  "name": "opencode-mission-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "description": "OpenCode plugin for session intelligence and attached background agents",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server-entry.d.ts",
+      "import": "./dist/server-entry.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bunx tsc -p tsconfig.json",
+    "typecheck": "bunx tsc --noEmit -p tsconfig.json",
+    "test": "bun test",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "1.14.18"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "6.0.3"
+  }
+}
