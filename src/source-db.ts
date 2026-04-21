@@ -67,15 +67,15 @@ export class MissionControlSourceDB {
   collectScopedSessionIDs(
     sessions: SourceSessionRecord[],
     scope: {
-      sessionID?: string
+      sessionId?: string
       includeChildren?: boolean
     },
   ): Set<string> {
-    if (!scope.sessionID) {
+    if (!scope.sessionId) {
       return new Set(sessions.map((session) => session.sessionID))
     }
 
-    const allowed = new Set<string>([scope.sessionID])
+    const allowed = new Set<string>([scope.sessionId])
     if (!scope.includeChildren) {
       return allowed
     }
@@ -91,7 +91,7 @@ export class MissionControlSourceDB {
       childrenByParent.set(session.parentSessionID, siblings)
     }
 
-    const queue = [scope.sessionID]
+    const queue = [scope.sessionId]
     while (queue.length > 0) {
       const current = queue.shift()
       if (!current) {

@@ -4,6 +4,7 @@ import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import type { OpenCodeAdapter } from "./opencode-client.js"
+import { normalizeRelayMode } from "./config.js"
 import { deliverParentRelay } from "./relay.js"
 import { extractSessionID, extractSessionTimestamp, extractStatus } from "./session-extractors.js"
 import type {
@@ -12,8 +13,9 @@ import type {
   JobListArgs,
   JobResultSnapshot,
   JobStartArgs,
-  JobStartResult,
   JobStatusResult,
+  MissionControlJob,
+  MissionControlJobResult,
   MissionControlConfig,
   RelayMode,
   ToolResult,
@@ -104,19 +106,19 @@ export class MissionControlJobController {
       consumeLaunchReservation?: boolean
     } = {},
   ): Promise<BackgroundJob> {
-    const relayMode = args.relayToParent ?? this.config.jobs.autoRelayToParent
+    const relayMode = args.relay ?? this.config.jobs.autoRelayToParent
     const job: BackgroundJob = {
       jobID: createJobID(),
       parentSessionID: parent.sessionID,
       parentDirectory: parent.directory,
-      title: args.title,
+      title: args.title ?? "Mission Control job",
       prompt: args.prompt,
       relayMode,
       state: "queued",
       createdAt: Date.now(),
       updatedAt: Date.now(),
       lastObservedEvent: "job.created",
-      relayState: relayMode === "never" ? "not_requested" : "pending",
+      relayState: relayMode === "manual" ? "not_requested" : "pending",
     }
 
     this.jobs.set(job.jobID, job)
@@ -377,11 +379,11 @@ export class MissionControlJobController {
 
   listJobs(args: JobListArgs = {}) {
     const jobs = Array.from(this.jobs.values())
-      .filter((job) => (args.parentSessionID ? job.parentSessionID === args.parentSessionID : true))
+      .filter((job) => (args.sessionId ? job.parentSessionID === args.sessionId : true))
       .filter((job) => (args.state ? job.state === args.state : true))
       .sort((left, right) => right.updatedAt - left.updatedAt)
 
-    return ok(jobs.slice(0, args.limit ?? 20))
+    return ok(jobs.slice(0, args.limit ?? 20).map(toPublicJob))
   }
 
   status(jobID: string): ToolResult<JobStatusResult> {
@@ -393,8 +395,8 @@ export class MissionControlJobController {
     const storedResult = this.results.get(jobID)
 
     return ok({
-      job,
-      result: canExposeStoredResult(job.state, Boolean(storedResult)) ? storedResult : undefined,
+      job: toPublicJob(job),
+      result: canExposeStoredResult(job.state, Boolean(storedResult)) ? toPublicJobResult(storedResult) : undefined,
     })
   }
 
@@ -438,10 +440,10 @@ export class MissionControlJobController {
       await this.relayResult(adapter, jobID)
     }
     await this.persist()
-    return ok(job)
+    return ok(toPublicJob(job))
   }
 
-  async getResult(adapter: OpenCodeAdapter, jobID: string, relayToParent: boolean) {
+  async getResult(adapter: OpenCodeAdapter, jobID: string, sendToParent: boolean) {
     const job = this.jobs.get(jobID)
     if (!job) {
       return fail("JobNotFound", `Job '${jobID}' was not found.`)
@@ -468,14 +470,14 @@ export class MissionControlJobController {
       )
     }
 
-    if (relayToParent) {
+    if (sendToParent) {
       const relayResult = await this.relayResult(adapter, jobID, { force: true })
       if (!relayResult.ok) {
         return relayResult
       }
     }
 
-    return ok(result)
+    return ok(toPublicJobResult(result))
   }
 
   async relayResult(
@@ -497,14 +499,6 @@ export class MissionControlJobController {
         "JobLaunchFailed",
         `Job '${jobID}' does not have a result to relay yet.`,
         "Wait for the child session to reach a stable end state, then retry.",
-      )
-    }
-
-    if (job.relayMode === "never") {
-      return fail(
-        "JobLaunchFailed",
-        `Job '${jobID}' is configured to never relay to the parent session.`,
-        "Start the job with manual_only, on_idle, or on_completion if parent relays are required.",
       )
     }
 
@@ -700,7 +694,7 @@ export class MissionControlJobController {
     job.state = "idle"
     this.recordJobEvent(job, eventType, { previousState })
 
-    if (job.relayMode === "never" || job.relayMode === "manual_only") {
+    if (job.relayMode === "manual") {
       const previousIdleState = job.state
       this.markCompleted(job)
       await this.captureResult(adapter, job)
@@ -847,14 +841,49 @@ const mergeBlockers = (job: BackgroundJob, reportedBlockers: string[]) => {
 }
 
 const normalizeLoadedJob = (job: BackgroundJob, config: MissionControlConfig): BackgroundJob => {
-  const relayMode = job.relayMode ?? config.jobs.autoRelayToParent
+  const relayMode = normalizeRelayMode(job.relayMode, config.jobs.autoRelayToParent)
   return {
     ...job,
     relayMode,
-    relayState: job.relayState ?? (relayMode === "never" ? "not_requested" : "pending"),
+    relayState: job.relayState ?? (relayMode === "manual" ? "not_requested" : "pending"),
     lastSourceUpdatedAt: job.lastSourceUpdatedAt,
   }
 }
+
+const toPublicJob = (job: BackgroundJob): MissionControlJob => ({
+  jobId: job.jobID,
+  sessionId: job.parentSessionID,
+  parentDirectory: job.parentDirectory,
+  childSessionId: job.childSessionID,
+  childDirectory: job.childDirectory,
+  title: job.title,
+  prompt: job.prompt,
+  relay: job.relayMode,
+  state: job.state,
+  createdAt: job.createdAt,
+  updatedAt: job.updatedAt,
+  launchedAt: job.launchedAt,
+  completedAt: job.completedAt,
+  failureReason: job.failureReason,
+  lastObservedEvent: job.lastObservedEvent,
+  lastSourceUpdatedAt: job.lastSourceUpdatedAt,
+  relayState: job.relayState,
+})
+
+const toPublicJobResult = (result: JobResultSnapshot | undefined): MissionControlJobResult | undefined =>
+  result
+    ? {
+        jobId: result.jobID,
+        childSessionId: result.childSessionID,
+        state: result.state,
+        headline: result.headline,
+        summary: result.summary,
+        blockers: result.blockers,
+        recommendedNextStep: result.recommendedNextStep,
+        keyMessageIds: result.keyMessageIDs,
+        observedAt: result.observedAt,
+      }
+    : undefined
 
 const parseStructuredFinalReport = (text: string) => {
   const sections: Record<string, string[]> = {}

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 
 import { afterEach, describe, expect, test } from "bun:test"
 
@@ -90,7 +90,7 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Analyze session",
       prompt: "Inspect the current codebase state.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -100,13 +100,13 @@ describe("MissionControl background jobs", () => {
 
     await controller.handleEvent(adapter, "session.idle", { sessionID: "child-session" }, config.jobs.autoRelayToParent)
 
-    const status = controller.status(launchResult.data.jobID)
+    const status = controller.status(launchResult.data.jobId)
     expect(status.ok).toBe(true)
     if (!status.ok) {
       throw new Error("Expected job status to exist")
     }
 
-    expect(status.data.job.childSessionID).toBe("child-session")
+    expect(status.data.job.childSessionId).toBe("child-session")
     expect(status.data.result?.summary).toContain("Completed background analysis")
     expect(status.data.job.state).toBe("completed")
     expect(status.data.result?.state).toBe("completed")
@@ -149,7 +149,7 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Status idle finalize",
       prompt: "Finalize from session.status idle.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -162,7 +162,7 @@ describe("MissionControl background jobs", () => {
       status: { type: "idle" },
     })
 
-    const status = controller.status(launchResult.data.jobID)
+    const status = controller.status(launchResult.data.jobId)
     expect(status.ok).toBe(true)
     if (!status.ok) {
       throw new Error("Expected status-idle job to exist")
@@ -172,7 +172,7 @@ describe("MissionControl background jobs", () => {
     expect(status.data.result?.state).toBe("completed")
   })
 
-  test("auto-attaches to the current session when no explicit parentSessionID is provided", async () => {
+  test("auto-attaches to the current session when no explicit sessionId is provided", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
 
@@ -219,7 +219,7 @@ describe("MissionControl background jobs", () => {
         prompt: "Follow the current session.",
       },
       {
-        sessionID: "current-session",
+        sessionId: "current-session",
         directory,
       },
     )
@@ -229,7 +229,7 @@ describe("MissionControl background jobs", () => {
       throw new Error("Expected auto-attach launch to succeed")
     }
 
-    expect(launchResult.data.parentSessionID).toBe("current-session")
+    expect(launchResult.data.sessionId).toBe("current-session")
     expect(createdParentID).toBe("current-session")
   })
 
@@ -285,7 +285,7 @@ describe("MissionControl background jobs", () => {
     const firstLaunch = launcher.launch(adapter, {
       title: "First launch",
       prompt: "Hold the slot briefly.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     await Promise.resolve()
@@ -293,7 +293,7 @@ describe("MissionControl background jobs", () => {
     const secondLaunch = await launcher.launch(adapter, {
       title: "Second launch",
       prompt: "This should be rejected while the first slot is reserved.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(secondLaunch.ok).toBe(false)
@@ -348,7 +348,7 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Rollback queued job",
       prompt: "This launch should fail before the queued job sticks.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(launchResult.ok).toBe(false)
@@ -463,8 +463,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Run analysis",
       prompt: "Do work in the background.",
-      parentSessionID: "parent-session",
-      relayToParent: "never",
+      sessionId: "parent-session",
+      relay: "manual",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -472,18 +472,18 @@ describe("MissionControl background jobs", () => {
       throw new Error("Expected launch to succeed")
     }
 
-    const earlyResult = await controller.getResult(adapter, launchResult.data.jobID, false)
+    const earlyResult = await controller.getResult(adapter, launchResult.data.jobId, false)
     expect(earlyResult.ok).toBe(false)
     expect(controller.getActiveJobCount()).toBe(1)
 
     await controller.handleEvent(adapter, "session.idle", { sessionID: "child-running" })
     expect(controller.getActiveJobCount()).toBe(0)
 
-    const stableResult = await controller.getResult(adapter, launchResult.data.jobID, false)
+    const stableResult = await controller.getResult(adapter, launchResult.data.jobId, false)
     expect(stableResult.ok).toBe(true)
   })
 
-  test("rejects manual relay for jobs configured with relayMode never", async () => {
+  test("allows manual relay for jobs configured with relay mode manual", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
 
@@ -492,7 +492,7 @@ describe("MissionControl background jobs", () => {
       session: {
         ...parentSessionHandlers(directory),
         async create() {
-          return { id: "child-never-relay" }
+          return { id: "child-manual-relay" }
         },
         async promptAsync() {
           return undefined
@@ -533,8 +533,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "No relay job",
       prompt: "Do not relay this result.",
-      parentSessionID: "parent-session",
-      relayToParent: "never",
+      sessionId: "parent-session",
+      relay: "manual",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -542,11 +542,11 @@ describe("MissionControl background jobs", () => {
       throw new Error("Expected launch to succeed")
     }
 
-    await controller.handleEvent(adapter, "session.idle", { sessionID: "child-never-relay" })
-    const relayResult = await controller.getResult(adapter, launchResult.data.jobID, true)
+    await controller.handleEvent(adapter, "session.idle", { sessionID: "child-manual-relay" })
+    const relayResult = await controller.getResult(adapter, launchResult.data.jobId, true)
 
-    expect(relayResult.ok).toBe(false)
-    expect(relayCount).toBe(0)
+    expect(relayResult.ok).toBe(true)
+    expect(relayCount).toBe(1)
   })
 
   test("keeps the stable result snapshot when automatic relay delivery fails", async () => {
@@ -603,8 +603,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Relay failure job",
       prompt: "Finish even if relay fails.",
-      parentSessionID: "parent-session",
-      relayToParent: "on_idle",
+      sessionId: "parent-session",
+      relay: "on_idle",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -614,7 +614,7 @@ describe("MissionControl background jobs", () => {
 
     await controller.handleEvent(adapter, "session.idle", { sessionID: "child-relay-fail" })
 
-    const status = controller.status(launchResult.data.jobID)
+    const status = controller.status(launchResult.data.jobId)
     expect(status.ok).toBe(true)
     if (!status.ok) {
       throw new Error("Expected relay-failure job status to exist")
@@ -625,7 +625,7 @@ describe("MissionControl background jobs", () => {
     expect(status.data.result?.summary).toContain("Finished work before relay failure")
     expect(relayAttempts).toBe(1)
 
-    const result = await controller.getResult(adapter, launchResult.data.jobID, false)
+    const result = await controller.getResult(adapter, launchResult.data.jobId, false)
     expect(result.ok).toBe(true)
   })
 
@@ -671,8 +671,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Restart idle orphan",
       prompt: "Leave this job idle with a failed relay.",
-      parentSessionID: "parent-session",
-      relayToParent: "on_idle",
+      sessionId: "parent-session",
+      relay: "on_idle",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -684,7 +684,7 @@ describe("MissionControl background jobs", () => {
 
     const controller2 = new MissionControlJobController(directory, config)
     await controller2.start()
-    const status = controller2.status(launchResult.data.jobID)
+    const status = controller2.status(launchResult.data.jobId)
     expect(status.ok).toBe(true)
     if (!status.ok) {
       throw new Error("Expected restarted idle job status to exist")
@@ -694,7 +694,7 @@ describe("MissionControl background jobs", () => {
     expect(status.data.result?.summary).toContain("Reached idle before restart")
     expect(controller2.getActiveJobCount()).toBe(0)
 
-    const result = await controller2.getResult(adapter, launchResult.data.jobID, false)
+    const result = await controller2.getResult(adapter, launchResult.data.jobId, false)
     expect(result.ok).toBe(true)
   })
 
@@ -740,8 +740,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Resume after idle",
       prompt: "Pause, then continue if more work appears.",
-      parentSessionID: "parent-session",
-      relayToParent: "on_idle",
+      sessionId: "parent-session",
+      relay: "on_idle",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -755,7 +755,7 @@ describe("MissionControl background jobs", () => {
     })
     expect(controller.getActiveJobCount()).toBe(1)
 
-    const idleStatus = controller.status(launchResult.data.jobID)
+    const idleStatus = controller.status(launchResult.data.jobId)
     expect(idleStatus.ok).toBe(true)
     if (!idleStatus.ok) {
       throw new Error("Expected idle job status to exist")
@@ -769,7 +769,7 @@ describe("MissionControl background jobs", () => {
       time: { updated: 11 },
     })
 
-    const resumedStatus = controller.status(launchResult.data.jobID)
+    const resumedStatus = controller.status(launchResult.data.jobId)
     expect(resumedStatus.ok).toBe(true)
     if (!resumedStatus.ok) {
       throw new Error("Expected resumed job status to exist")
@@ -779,7 +779,7 @@ describe("MissionControl background jobs", () => {
     expect(resumedStatus.data.result).toBeUndefined()
     expect(controller.getActiveJobCount()).toBe(1)
 
-    const resumedResult = await controller.getResult(adapter, launchResult.data.jobID, false)
+    const resumedResult = await controller.getResult(adapter, launchResult.data.jobId, false)
     expect(resumedResult.ok).toBe(false)
   })
 
@@ -825,8 +825,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Ignore stale status",
       prompt: "Do not reopen from stale status.",
-      parentSessionID: "parent-session",
-      relayToParent: "on_idle",
+      sessionId: "parent-session",
+      relay: "on_idle",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -844,7 +844,7 @@ describe("MissionControl background jobs", () => {
       time: { updated: 9 },
     })
 
-    const status = controller.status(launchResult.data.jobID)
+    const status = controller.status(launchResult.data.jobId)
     expect(status.ok).toBe(true)
     if (!status.ok) {
       throw new Error("Expected stale-status job status to exist")
@@ -895,8 +895,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Fresh status resume",
       prompt: "Allow a fresh status event to reopen idle work.",
-      parentSessionID: "parent-session",
-      relayToParent: "on_idle",
+      sessionId: "parent-session",
+      relay: "on_idle",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -914,7 +914,7 @@ describe("MissionControl background jobs", () => {
       time: { updated: 11 },
     })
 
-    const status = controller.status(launchResult.data.jobID)
+    const status = controller.status(launchResult.data.jobId)
     expect(status.ok).toBe(true)
     if (!status.ok) {
       throw new Error("Expected fresh-status job status to exist")
@@ -968,8 +968,8 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Fail and relay",
       prompt: "Relay failure state on completion.",
-      parentSessionID: "parent-session",
-      relayToParent: "on_completion",
+      sessionId: "parent-session",
+      relay: "on_completion",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -979,7 +979,7 @@ describe("MissionControl background jobs", () => {
 
     await controller.handleEvent(adapter, "session.error", { sessionID: "child-failed-relay" })
 
-    const status = controller.status(launchResult.data.jobID)
+    const status = controller.status(launchResult.data.jobId)
     expect(status.ok).toBe(true)
     if (!status.ok) {
       throw new Error("Expected failed job status to exist")
@@ -1022,7 +1022,7 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Partial failure job",
       prompt: "This launch will fail after child creation.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(launchResult.ok).toBe(false)
@@ -1034,7 +1034,7 @@ describe("MissionControl background jobs", () => {
       throw new Error("Expected tracked jobs to be listed")
     }
 
-    expect(listResult.data[0]?.childSessionID).toBe("child-partial-failure")
+    expect(listResult.data[0]?.childSessionId).toBe("child-partial-failure")
     expect(listResult.data[0]?.state).toBe("failed")
   })
 
@@ -1083,7 +1083,7 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Finalize then refuse cancel",
       prompt: "Finish and become idle.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -1092,9 +1092,60 @@ describe("MissionControl background jobs", () => {
     }
 
     await controller.handleEvent(adapter, "session.idle", { sessionID: "child-finalized" })
-    const cancelResult = await controller.cancelJob(adapter, launchResult.data.jobID)
+    const cancelResult = await controller.cancelJob(adapter, launchResult.data.jobId)
 
     expect(cancelResult.ok).toBe(false)
+  })
+
+  test("returns the v2 public job shape when aborting an active job", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-abortable", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return []
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig()
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Abort me",
+      prompt: "Start and wait.",
+      sessionId: "parent-session",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    const cancelResult = await controller.cancelJob(adapter, launchResult.data.jobId)
+    expect(cancelResult.ok).toBe(true)
+    if (!cancelResult.ok) {
+      throw new Error("Expected cancel to succeed")
+    }
+
+    expect(cancelResult.data.jobId).toBe(launchResult.data.jobId)
+    expect(cancelResult.data.sessionId).toBe("parent-session")
+    expect(cancelResult.data.childSessionId).toBe("child-abortable")
+    expect(cancelResult.data.relay).toBe("manual")
+    expect(cancelResult.data.state).toBe("aborted")
   })
 
   test("finalizes with a fallback snapshot when transcript capture fails", async () => {
@@ -1127,7 +1178,7 @@ describe("MissionControl background jobs", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Fallback finalize",
       prompt: "Trigger idle finalization even if transcript capture fails.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -1136,7 +1187,7 @@ describe("MissionControl background jobs", () => {
     }
 
     await controller.handleEvent(adapter, "session.idle", { sessionID: "child-fallback" })
-    const result = await controller.getResult(adapter, launchResult.data.jobID, false)
+    const result = await controller.getResult(adapter, launchResult.data.jobId, false)
 
     expect(result.ok).toBe(true)
     if (!result.ok) {
@@ -1205,8 +1256,8 @@ Recommended Next Step: Run the full verification suite before merging.`,
     const launchResult = await launcher.launch(adapter, {
       title: "Structured relay",
       prompt: "Finish with the required report headings.",
-      parentSessionID: "parent-session",
-      relayToParent: "on_completion",
+      sessionId: "parent-session",
+      relay: "on_completion",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -1216,7 +1267,7 @@ Recommended Next Step: Run the full verification suite before merging.`,
 
     await controller.handleEvent(adapter, "session.idle", { sessionID: "child-structured-relay" })
 
-    const result = await controller.getResult(adapter, launchResult.data.jobID, false)
+    const result = await controller.getResult(adapter, launchResult.data.jobId, false)
     expect(result.ok).toBe(true)
     if (!result.ok) {
       throw new Error("Expected structured result to exist")
@@ -1260,7 +1311,7 @@ Recommended Next Step: Run the full verification suite before merging.`,
 
     const config = createMissionControlConfig({
       jobs: {
-        autoRelayToParent: "never",
+        autoRelayToParent: "manual",
       },
     })
     const controller = new MissionControlJobController(directory, config)
@@ -1270,8 +1321,8 @@ Recommended Next Step: Run the full verification suite before merging.`,
     const launchResult = await launcher.launch(adapter, {
       title: "Persist events",
       prompt: "Exercise the lifecycle log.",
-      parentSessionID: "parent-session",
-      relayToParent: "never",
+      sessionId: "parent-session",
+      relay: "manual",
     })
 
     expect(launchResult.ok).toBe(true)
@@ -1289,14 +1340,60 @@ Recommended Next Step: Run the full verification suite before merging.`,
       }>
     }
 
-    const jobEvents = persisted.events?.filter((event) => event.jobID === launchResult.data.jobID) ?? []
+    const jobEvents = persisted.events?.filter((event) => event.jobID === launchResult.data.jobId) ?? []
     expect(jobEvents.map((event) => event.type)).toEqual(
       expect.arrayContaining(["job.created", "job.launching", "job.child_bound", "job.launched", "session.idle", "job.completed"]),
     )
     expect(jobEvents.at(-1)?.state).toBe("completed")
   })
 
-  test("returns ParentSessionNotFound when an explicit parentSessionID cannot be resolved", async () => {
+  test("normalizes legacy stored relay modes on load", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const storePath = getJobsStorePath(directory)
+    await mkdir(dirname(storePath), { recursive: true })
+
+    await writeFile(
+      storePath,
+      JSON.stringify(
+        {
+          version: 1,
+          jobs: [
+            {
+              jobID: "job-legacy",
+              parentSessionID: "parent-session",
+              title: "Legacy Job",
+              prompt: "Legacy prompt",
+              relayMode: "manual_only",
+              state: "completed",
+              createdAt: 1,
+              updatedAt: 2,
+              relayState: "pending",
+            },
+          ],
+          results: [],
+          events: [],
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    )
+
+    const controller = new MissionControlJobController(directory, createMissionControlConfig())
+    await controller.start()
+
+    const status = controller.status("job-legacy")
+    expect(status.ok).toBe(true)
+    if (!status.ok) {
+      throw new Error("Expected legacy job to load")
+    }
+
+    expect(status.data.job.relay).toBe("manual")
+  })
+
+  test("returns ParentSessionNotFound when an explicit sessionId cannot be resolved", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
 
@@ -1333,7 +1430,7 @@ Recommended Next Step: Run the full verification suite before merging.`,
     const launchResult = await launcher.launch(adapter, {
       title: "Missing explicit parent",
       prompt: "This should fail early.",
-      parentSessionID: "parent-session",
+      sessionId: "parent-session",
     })
 
     expect(launchResult.ok).toBe(false)
@@ -1345,7 +1442,7 @@ Recommended Next Step: Run the full verification suite before merging.`,
     expect(createCalls).toBe(0)
   })
 
-  test("rejects a blank explicit parentSessionID instead of falling back to auto-attach", async () => {
+  test("rejects a blank explicit sessionId instead of falling back to auto-attach", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
 
@@ -1394,8 +1491,7 @@ Recommended Next Step: Run the full verification suite before merging.`,
     const launchResult = await launcher.launch(adapter, {
       title: "Blank explicit parent",
       prompt: "Do not auto-attach.",
-      parentSessionID: "   ",
-      attach: "auto",
+      sessionId: "   ",
     })
 
     expect(launchResult.ok).toBe(false)

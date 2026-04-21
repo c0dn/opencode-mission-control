@@ -1,6 +1,6 @@
 # Runtime model and behavioral guarantees
 
-This document covers Mission Control behavior that spans multiple tools. Tool-specific arguments and examples still live in the individual `docs/mission_control_*.md` files.
+This document covers Mission Control behavior that spans multiple tools. Tool-specific arguments and examples still live in the individual `docs/mc_*.md` files.
 
 ## Runtime scope
 
@@ -37,7 +37,7 @@ Rules:
 
 Background jobs resolve their parent in this order:
 
-1. explicit `parentSessionID`
+1. explicit `sessionId`
 2. current tool caller session
 3. latest root session in scope, if fallback is enabled
 
@@ -139,7 +139,7 @@ Important mappings:
 | `permission.asked` / `permission.replied` | track permission-blocked jobs |
 | `question.asked` / `question.replied` / `question.rejected` | track question-blocked jobs |
 
-`mission_control_session_observe` is backed by an in-memory recent-event buffer. It is a live/recent view, not a full audit log.
+`mc_session_events` is backed by an in-memory recent-event buffer. It is a live and recent view, not a full audit log.
 
 ## Persistence model
 
@@ -166,8 +166,8 @@ Persistence rules:
 
 Parent relays carry:
 
-- `jobID`
-- `childSessionID`
+- `jobId`
+- `childSessionId`
 - `title`
 - `state`
 - `summary`
@@ -177,8 +177,14 @@ Parent relays carry:
 Delivery rules:
 
 - at-most-once by default per finalized stored snapshot
-- explicit redelivery is allowed through `mission_control_job_result(..., relayToParent=true)`
+- explicit redelivery is allowed through `mc_job_result({ jobId, sendToParent: true })`
 - relay failure must not erase the stored result snapshot
+
+Public relay modes:
+
+- `manual` stores the result without automatic parent delivery
+- `on_idle` relays when the child session settles after useful work
+- `on_completion` relays on idle and also on stable failure or abort completion paths
 
 ## Semantic search
 

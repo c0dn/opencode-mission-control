@@ -10,13 +10,13 @@ export const buildSessionChunks = (
   const sessionMap = new Map(sessions.map((session) => [session.sessionID, session]))
 
   return entries.flatMap((entry) => {
-    const session = sessionMap.get(entry.sessionID)
+    const session = sessionMap.get(entry.sessionId)
 
     return entry.parts.map((part, index) => ({
-      chunkID: part.partID ?? `${entry.sessionID}:${entry.messageID}:${index}`,
-      sessionID: entry.sessionID,
-      messageID: entry.messageID,
-      partID: part.partID,
+      chunkID: part.partId ?? `${entry.sessionId}:${entry.messageId}:${index}`,
+      sessionID: entry.sessionId,
+      messageID: entry.messageId,
+      partID: part.partId,
       parentSessionID: session?.parentSessionID,
       role: normalizeRole(entry.role),
       partType: normalizePartType(part.type),

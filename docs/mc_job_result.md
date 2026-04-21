@@ -1,23 +1,27 @@
-# `mission_control_job_result`
+# `mc_job_result`
 
 Returns the latest stable result snapshot for a tracked job.
 
 ## Call
 
 ```text
-mission_control_job_result(jobID, relayToParent?)
+mc_job_result({ jobId, sendToParent? })
 ```
 
 ## Arguments
 
-- `jobID` — required job ID
-- `relayToParent` — when `true`, also relay the stored result to the parent session
+- `jobId` — required job ID
+- `sendToParent` — when `true`, also relay the stored result to the parent session
 
 ## Example
 
 ```text
-mission_control_job_result(jobID="job_123")
-mission_control_job_result(jobID="job_123", relayToParent=true)
+mc_job_result({ jobId: "job_123" })
+
+mc_job_result({
+  jobId: "job_123",
+  sendToParent: true,
+})
 ```
 
 ## What it returns
@@ -28,13 +32,13 @@ A stable result snapshot containing:
 - `summary`
 - `blockers`
 - `recommendedNextStep` when the child session reported one
-- `keyMessageIDs`
+- `keyMessageIds`
 - `state`
 - `observedAt`
 
 ## Caveats
 
 - This only succeeds after the job reaches a stable state such as `idle`, `completed`, `failed`, or `aborted`.
-- If Mission Control already captured a stable snapshot before a later restart/orphaning event, that stored snapshot can still be returned.
-- `relayToParent=true` can fail if the job was configured with `relayMode="never"`.
+- If Mission Control already captured a stable snapshot before a later restart or orphaning event, that stored snapshot can still be returned.
+- `sendToParent: true` is the manual relay path. It is especially useful for jobs started with `relay: "manual"`.
 - If a transcript cannot be captured during finalization, Mission Control falls back to a best-effort result snapshot.

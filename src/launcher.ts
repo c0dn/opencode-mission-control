@@ -49,11 +49,16 @@ export class MissionControlJobLauncher {
         return parentResolution
       }
 
+      const title = normalizeJobTitle(args.title, args.prompt)
+
       reservationTransferred = true
       job = await this.controller.createJob(
-        args,
         {
-          sessionID: parentResolution.data.sessionID,
+          ...args,
+          title,
+        },
+        {
+          sessionID: parentResolution.data.sessionId,
           directory: parentResolution.data.directory,
         },
         {
@@ -63,8 +68,8 @@ export class MissionControlJobLauncher {
 
       await this.controller.markLaunching(job.jobID)
       const childSession = await adapter.createChildSession(
-        parentResolution.data.sessionID,
-        `${config.jobs.titlePrefix}: ${args.title}`,
+        parentResolution.data.sessionId,
+        `${config.jobs.titlePrefix}: ${title}`,
         parentResolution.data.directory,
       )
       const childSessionID = typeof childSession?.id === "string" ? childSession.id : undefined
@@ -80,9 +85,9 @@ export class MissionControlJobLauncher {
       await this.controller.markLaunched(job.jobID, childSessionID, childDirectory)
 
       return ok({
-        jobID: job.jobID,
-        parentSessionID: job.parentSessionID,
-        childSessionID,
+        jobId: job.jobID,
+        sessionId: job.parentSessionID,
+        childSessionId: childSessionID,
         state: "running",
       })
     } catch (error) {
@@ -90,9 +95,9 @@ export class MissionControlJobLauncher {
 
       if (job && this.controller.status(job.jobID).ok) {
         const currentStatus = this.controller.status(job.jobID)
-        if (currentStatus.ok && currentStatus.data.job.childSessionID) {
+        if (currentStatus.ok && currentStatus.data.job.childSessionId) {
           try {
-            await adapter.abortSession(currentStatus.data.job.childSessionID, currentStatus.data.job.childDirectory)
+            await adapter.abortSession(currentStatus.data.job.childSessionId, currentStatus.data.job.childDirectory)
             await this.controller.markLaunchFailed(job.jobID, message)
           } catch {
             await this.controller.markOrphaned(
@@ -123,13 +128,13 @@ export class MissionControlJobLauncher {
     caller: ToolCallerContext,
     config: MissionControlConfig,
   ): Promise<ToolResult<ParentSessionResolution>> {
-    if (args.parentSessionID !== undefined) {
-      const explicitParentSessionID = args.parentSessionID.trim()
+    if (args.sessionId !== undefined) {
+      const explicitParentSessionID = args.sessionId.trim()
       if (!explicitParentSessionID) {
         return fail(
           "ParentSessionNotFound",
-          "A blank parentSessionID is not a valid explicit parent session reference.",
-          "Pass a real session ID or omit parentSessionID to use automatic attachment.",
+          "A blank sessionId is not a valid explicit parent session reference.",
+          "Pass a real session ID or omit sessionId to attach to the caller session.",
         )
       }
 
@@ -137,7 +142,7 @@ export class MissionControlJobLauncher {
         const resolved = await adapter.resolveSession(explicitParentSessionID)
         return ok({
           mode: "explicit_parent",
-          sessionID: explicitParentSessionID,
+          sessionId: explicitParentSessionID,
           directory: resolved.directory,
           confidence: "explicit",
         })
@@ -145,36 +150,27 @@ export class MissionControlJobLauncher {
         return fail(
           "ParentSessionNotFound",
           `Parent session '${explicitParentSessionID}' was not found.`,
-          "Pass an existing parentSessionID or omit it to use automatic attachment.",
+          "Pass an existing sessionId or omit it to attach to the caller session.",
         )
       }
     }
 
-    const autoAttachEnabled = args.attach === "auto" || (args.attach !== "explicit_only" && config.jobs.autoAttachToCurrentSession)
-    if (!autoAttachEnabled) {
-      return fail(
-        "ParentSessionNotFound",
-        "Automatic parent-session attachment is disabled for this job launch.",
-        "Pass parentSessionID explicitly or use attach='auto'.",
-      )
-    }
-
-    if (caller.sessionID) {
+    if (caller.sessionId) {
       try {
-        const resolved = await adapter.resolveSession(caller.sessionID)
+        const resolved = await adapter.resolveSession(caller.sessionId)
         return ok({
           mode: "current_session",
-          sessionID: caller.sessionID,
+          sessionId: caller.sessionId,
           directory: resolved.directory ?? caller.directory,
           confidence: "high",
         })
-        } catch {
-          if (!config.jobs.allowLatestSessionFallback) {
-            return fail(
-              "ParentSessionScopeUnavailable",
-              "The current session could not be resolved for automatic attachment.",
-              "Pass parentSessionID explicitly or enable latest-session fallback.",
-            )
+      } catch {
+        if (!config.jobs.allowLatestSessionFallback) {
+          return fail(
+            "ParentSessionScopeUnavailable",
+            "The caller session could not be resolved for automatic attachment.",
+            "Pass sessionId explicitly or enable latest-session fallback.",
+          )
         }
       }
     }
@@ -182,8 +178,8 @@ export class MissionControlJobLauncher {
     if (!config.jobs.allowLatestSessionFallback) {
       return fail(
         "ParentSessionScopeUnavailable",
-        "Automatic attachment could not resolve a current parent session.",
-        "Pass parentSessionID explicitly or enable latest-session fallback.",
+        "Automatic attachment could not resolve a caller parent session.",
+        "Pass sessionId explicitly or enable latest-session fallback.",
       )
     }
 
@@ -191,46 +187,46 @@ export class MissionControlJobLauncher {
     try {
       sessions = await adapter.listSessions({ directory: caller.directory })
     } catch {
-      return fail(
-        "ParentSessionScopeUnavailable",
-        "Mission Control could not inspect the current session scope for a fallback parent.",
-        "Pass parentSessionID explicitly and retry.",
-      )
-    }
+        return fail(
+          "ParentSessionScopeUnavailable",
+          "Mission Control could not inspect the current session scope for a fallback parent.",
+          "Pass sessionId explicitly and retry.",
+        )
+      }
 
     const rootSessions = sessions
       .filter((session) => extractSessionID(session) && !extractParentSessionID(session))
       .sort((left, right) => toUpdatedAt(right) - toUpdatedAt(left))
 
     if (rootSessions.length === 0) {
-      return fail(
-        "ParentSessionNotFound",
-        "No root session is available in the current scope for fallback attachment.",
-        "Pass parentSessionID explicitly and retry.",
-      )
-    }
+        return fail(
+          "ParentSessionNotFound",
+          "No root session is available in the current scope for fallback attachment.",
+          "Pass sessionId explicitly and retry.",
+        )
+      }
 
     if (rootSessions.length > 1 && config.safety.requireExplicitParentOnAmbiguousAttach) {
-      return fail(
-        "AmbiguousParentSession",
-        "More than one root session is available for fallback attachment.",
-        "Pass parentSessionID explicitly to choose the correct parent session.",
-      )
-    }
+        return fail(
+          "AmbiguousParentSession",
+          "More than one root session is available for fallback attachment.",
+          "Pass sessionId explicitly to choose the correct parent session.",
+        )
+      }
 
     const chosen = rootSessions[0]
     const chosenSessionID = extractSessionID(chosen)
     if (!chosenSessionID) {
-      return fail(
-        "ParentSessionScopeUnavailable",
-        "Mission Control could not read a fallback parent session ID from the current scope.",
-        "Pass parentSessionID explicitly and retry.",
-      )
-    }
+        return fail(
+          "ParentSessionScopeUnavailable",
+          "Mission Control could not read a fallback parent session ID from the current scope.",
+          "Pass sessionId explicitly and retry.",
+        )
+      }
 
     return ok({
       mode: "scope_latest_session",
-      sessionID: chosenSessionID,
+      sessionId: chosenSessionID,
       directory: extractDirectory(chosen) ?? caller.directory,
       confidence: "best_effort",
     })
@@ -239,4 +235,13 @@ export class MissionControlJobLauncher {
 
 const toUpdatedAt = (session: any) => {
   return extractSessionTimestamp(session, "updated") ?? extractSessionTimestamp(session, "created") ?? 0
+}
+
+const normalizeJobTitle = (title: string | undefined, prompt: string) => {
+  const explicit = title?.trim()
+  if (explicit) {
+    return explicit
+  }
+
+  return "Mission Control job"
 }

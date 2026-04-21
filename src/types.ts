@@ -7,7 +7,7 @@ export type ParentResolutionMode =
   | "current_session"
   | "scope_latest_session"
 
-export type RelayMode = "never" | "on_idle" | "on_completion" | "manual_only"
+export type RelayMode = "manual" | "on_idle" | "on_completion"
 
 export type JobState =
   | "queued"
@@ -142,27 +142,26 @@ export interface ParentRelayPayload {
 }
 
 export interface JobStatusResult {
-  job: BackgroundJob
-  result?: JobResultSnapshot
+  job: MissionControlJob
+  result?: MissionControlJobResult
 }
 
 export interface JobStartArgs {
-  title: string
   prompt: string
-  parentSessionID?: string
-  attach?: "auto" | "explicit_only"
-  relayToParent?: RelayMode
+  sessionId?: string
+  title?: string
+  relay?: RelayMode
 }
 
 export interface JobStartResult {
-  jobID: string
-  parentSessionID: string
-  childSessionID: string
+  jobId: string
+  sessionId: string
+  childSessionId: string
   state: "launching" | "running"
 }
 
 export interface JobListArgs {
-  parentSessionID?: string
+  sessionId?: string
   state?: JobState
   limit?: number
 }
@@ -206,13 +205,13 @@ export interface MissionControlCapabilityMatrix {
 export interface MissionControlEventRecord {
   type: string
   at: number
-  sessionID?: string
+  sessionId?: string
   summary: string
 }
 
 export interface RuntimeSessionMetadata {
-  sessionID: string
-  parentSessionID?: string
+  sessionId: string
+  parentSessionId?: string
   title?: string
   directory?: string
   createdAt?: number
@@ -221,14 +220,14 @@ export interface RuntimeSessionMetadata {
 }
 
 export interface ToolCallerContext {
-  sessionID?: string
+  sessionId?: string
   directory?: string
   worktree?: string
 }
 
 export interface ParentSessionResolution {
   mode: ParentResolutionMode
-  sessionID: string
+  sessionId: string
   directory?: string
   confidence: "explicit" | "high" | "best_effort"
 }
@@ -265,15 +264,15 @@ export interface MissionControlStatus {
 }
 
 export interface SessionTranscriptPart {
-  partID?: string
+  partId?: string
   type: string
   text: string
   toolName?: string
 }
 
 export interface SessionTranscriptEntry {
-  sessionID: string
-  messageID: string
+  sessionId: string
+  messageId: string
   role: string
   agent?: string
   createdAt: number
@@ -282,16 +281,16 @@ export interface SessionTranscriptEntry {
 
 export interface SessionSearchArgs {
   query: string
-  sessionID?: string
-  global?: boolean
+  sessionId?: string
+  scope?: "local" | "global"
   exact?: boolean
   limit?: number
 }
 
 export interface SessionSearchMatch {
-  sessionID: string
-  messageID: string
-  partID?: string
+  sessionId: string
+  messageId: string
+  partId?: string
   score: number
   matchType: "exact" | "candidate"
   title?: string
@@ -330,28 +329,60 @@ export interface MissionControlRuntimeSecrets {
 }
 
 export interface SessionReadResult {
-  sessionID: string
+  sessionId: string
   entries: SessionTranscriptEntry[]
-  includedChildSessionIDs: string[]
+  includedChildSessionIds: string[]
 }
 
 export interface SessionTreeNode {
-  sessionID: string
+  sessionId: string
   title?: string
-  parentSessionID?: string
+  parentSessionId?: string
   status?: string
   children: SessionTreeNode[]
 }
 
 export interface SessionObserveResult {
-  sessionID: string
+  sessionId: string
   status?: string
   recentEvents: MissionControlEventRecord[]
   children?: Array<{
-    sessionID: string
+    sessionId: string
     status?: string
     title?: string
   }>
+}
+
+export interface MissionControlJob {
+  jobId: string
+  sessionId: string
+  parentDirectory?: string
+  childSessionId?: string
+  childDirectory?: string
+  title: string
+  prompt: string
+  relay: RelayMode
+  state: JobState
+  createdAt: number
+  updatedAt: number
+  launchedAt?: number
+  completedAt?: number
+  failureReason?: string
+  lastObservedEvent?: string
+  lastSourceUpdatedAt?: number
+  relayState: "not_requested" | "pending" | "delivered" | "failed"
+}
+
+export interface MissionControlJobResult {
+  jobId: string
+  childSessionId: string
+  state: "idle" | "completed" | "failed" | "aborted"
+  headline: string
+  summary: string
+  blockers: string[]
+  recommendedNextStep?: string
+  keyMessageIds: string[]
+  observedAt: number
 }
 
 export type DeepPartial<T> = {

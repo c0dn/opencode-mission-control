@@ -120,7 +120,7 @@ export const extractSessionTimestamp = (
 }
 
 export const normalizeMessage = (
-  sessionID: string,
+  sessionId: string,
   message: any,
   includeToolOutputs: boolean,
 ): SessionTranscriptEntry | undefined => {
@@ -138,8 +138,8 @@ export const normalizeMessage = (
   }
 
   return {
-    sessionID,
-    messageID: typeof info.id === "string" ? info.id : `${sessionID}:${Date.now()}`,
+    sessionId,
+    messageId: typeof info.id === "string" ? info.id : `${sessionId}:${Date.now()}`,
     role: typeof info.role === "string" ? info.role : "unknown",
     agent: typeof info.agent === "string" ? info.agent : undefined,
     createdAt: asTimestamp(createdAt),
@@ -160,7 +160,7 @@ const normalizePart = (part: any): SessionTranscriptPart | undefined => {
   }
 
   return {
-    partID: typeof part.id === "string" ? part.id : undefined,
+    partId: typeof part.id === "string" ? part.id : undefined,
     type,
     text,
     toolName:

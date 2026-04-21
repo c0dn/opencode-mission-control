@@ -2,6 +2,7 @@ import type {
   DeepPartial,
   MissionControlConfig,
   MissionControlPluginOptions,
+  RelayMode,
   MissionControlRuntimeSecrets,
 } from "./types.js"
 
@@ -27,9 +28,9 @@ export const DEFAULT_CONFIG: MissionControlConfig = {
   jobs: {
     enabled: true,
     maxConcurrent: 2,
-    autoAttachToCurrentSession: false,
+    autoAttachToCurrentSession: true,
     allowLatestSessionFallback: false,
-    autoRelayToParent: "manual_only",
+    autoRelayToParent: "manual",
     titlePrefix: "Mission Control",
     keepChildSessionOnCompletion: true,
   },
@@ -54,6 +55,8 @@ export const createMissionControlConfig = (
   jobs: {
     ...DEFAULT_CONFIG.jobs,
     ...overrides.jobs,
+    autoAttachToCurrentSession: true,
+    autoRelayToParent: normalizeRelayMode(overrides.jobs?.autoRelayToParent, DEFAULT_CONFIG.jobs.autoRelayToParent),
   },
   safety: {
     ...DEFAULT_CONFIG.safety,
@@ -113,4 +116,19 @@ export const resolveMissionControlRuntime = (
 const normalizeString = (value: string | undefined) => {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
+}
+
+export const normalizeRelayMode = (
+  value: string | undefined,
+  fallback: RelayMode = DEFAULT_CONFIG.jobs.autoRelayToParent,
+): RelayMode => {
+  if (value === "on_idle" || value === "on_completion" || value === "manual") {
+    return value
+  }
+
+  if (value === "manual_only" || value === "never") {
+    return "manual"
+  }
+
+  return fallback
 }

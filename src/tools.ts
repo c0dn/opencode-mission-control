@@ -10,7 +10,7 @@ const toPluginToolResult = (value: unknown): PluginToolResult => ({
 })
 
 export const createMissionControlTools = (server: MissionControlServer) => ({
-  mission_control_status: tool({
+  mc_status: tool({
     description: "Return mission-control runtime status",
     args: {},
     async execute() {
@@ -18,61 +18,61 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     },
   }),
 
-  mission_control_session_read: tool({
-    description: "Read a session transcript with optional children",
+  mc_session_read: tool({
+    description: "Read one session transcript, optionally with children",
     args: {
-      sessionID: tool.schema.string(),
-      beforeMessageID: tool.schema.string().optional(),
+      sessionId: tool.schema.string(),
+      beforeMessageId: tool.schema.string().optional(),
       limit: tool.schema.number().optional(),
-      includeChildren: tool.schema.boolean().optional(),
-      includeToolOutputs: tool.schema.boolean().optional(),
+      withChildren: tool.schema.boolean().optional(),
+      withToolOutputs: tool.schema.boolean().optional(),
     },
     async execute(args) {
       return toPluginToolResult(
-        await server.readSession(args.sessionID, {
-          beforeMessageID: args.beforeMessageID,
+        await server.readSession(args.sessionId, {
+          beforeMessageId: args.beforeMessageId,
           limit: clampResultLimit(args.limit, server.config),
-          includeChildren: args.includeChildren,
-          includeToolOutputs: args.includeToolOutputs,
+          withChildren: args.withChildren,
+          withToolOutputs: args.withToolOutputs,
         }),
       )
     },
   }),
 
-  mission_control_session_tree: tool({
+  mc_session_tree: tool({
     description: "Return a session parent-child tree",
     args: {
-      sessionID: tool.schema.string(),
+      sessionId: tool.schema.string(),
       depth: tool.schema.number().optional(),
     },
     async execute(args) {
-      return toPluginToolResult(await server.sessionTree(args.sessionID, args.depth ?? 1))
+      return toPluginToolResult(await server.sessionTree(args.sessionId, args.depth ?? 1))
     },
   }),
 
-  mission_control_session_observe: tool({
-    description: "Return recent operational events for a session",
+  mc_session_events: tool({
+    description: "Return recent events and live status for a session",
     args: {
-      sessionID: tool.schema.string(),
-      includeChildren: tool.schema.boolean().optional(),
-      eventLimit: tool.schema.number().optional(),
+      sessionId: tool.schema.string(),
+      withChildren: tool.schema.boolean().optional(),
+      limit: tool.schema.number().optional(),
     },
     async execute(args) {
       return toPluginToolResult(
-        await server.observeSession(args.sessionID, {
-          includeChildren: args.includeChildren,
-          eventLimit: args.eventLimit,
+        await server.observeSession(args.sessionId, {
+          withChildren: args.withChildren,
+          limit: args.limit,
         }),
       )
     },
   }),
 
-  mission_control_session_search: tool({
-    description: "Search indexed session content",
+  mc_session_search: tool({
+    description: "Search indexed session content by query",
     args: {
       query: tool.schema.string(),
-      sessionID: tool.schema.string().optional(),
-      global: tool.schema.boolean().optional(),
+      sessionId: tool.schema.string().optional(),
+      scope: tool.schema.enum(["local", "global"]).optional(),
       exact: tool.schema.boolean().optional(),
       limit: tool.schema.number().optional(),
     },
@@ -80,8 +80,8 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       return toPluginToolResult(
         await server.searchSessions({
           query: args.query,
-          sessionID: args.sessionID,
-          global: args.global,
+          sessionId: args.sessionId,
+          scope: args.scope,
           exact: args.exact,
           limit: clampResultLimit(args.limit, server.config),
         }),
@@ -89,27 +89,25 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     },
   }),
 
-  mission_control_job_start: tool({
+  mc_job_start: tool({
     description: "Launch a background child-session job",
     args: {
-      title: tool.schema.string(),
       prompt: tool.schema.string(),
-      parentSessionID: tool.schema.string().optional(),
-      attach: tool.schema.enum(["auto", "explicit_only"]).optional(),
-      relayToParent: tool.schema.enum(["never", "on_idle", "on_completion", "manual_only"]).optional(),
+      sessionId: tool.schema.string().optional(),
+      title: tool.schema.string().optional(),
+      relay: tool.schema.enum(["manual", "on_idle", "on_completion"]).optional(),
     },
     async execute(args, context) {
       return toPluginToolResult(
         await server.startJob(
           {
-            title: args.title,
             prompt: args.prompt,
-            parentSessionID: args.parentSessionID,
-            attach: args.attach,
-            relayToParent: args.relayToParent,
+            sessionId: args.sessionId,
+            title: args.title,
+            relay: args.relay,
           },
           {
-            sessionID: context.sessionID,
+            sessionId: context.sessionID,
             directory: context.directory,
             worktree: context.worktree,
           },
@@ -118,20 +116,20 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     },
   }),
 
-  mission_control_job_status: tool({
+  mc_job_status: tool({
     description: "Return the current state for a background job",
     args: {
-      jobID: tool.schema.string(),
+      jobId: tool.schema.string(),
     },
     async execute(args) {
-      return toPluginToolResult(server.jobStatus(args.jobID))
+      return toPluginToolResult(server.jobStatus(args.jobId))
     },
   }),
 
-  mission_control_job_list: tool({
+  mc_job_list: tool({
     description: "List tracked background jobs",
     args: {
-      parentSessionID: tool.schema.string().optional(),
+      sessionId: tool.schema.string().optional(),
       state: tool.schema
         .enum([
           "queued",
@@ -151,7 +149,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     async execute(args) {
       return toPluginToolResult(
         server.listJobs({
-          parentSessionID: args.parentSessionID,
+          sessionId: args.sessionId,
           state: args.state,
           limit: args.limit,
         }),
@@ -159,24 +157,24 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     },
   }),
 
-  mission_control_job_cancel: tool({
+  mc_job_abort: tool({
     description: "Abort a running background job",
     args: {
-      jobID: tool.schema.string(),
+      jobId: tool.schema.string(),
     },
     async execute(args) {
-      return toPluginToolResult(await server.cancelJob(args.jobID))
+      return toPluginToolResult(await server.cancelJob(args.jobId))
     },
   }),
 
-  mission_control_job_result: tool({
+  mc_job_result: tool({
     description: "Get the latest stable result snapshot for a background job",
     args: {
-      jobID: tool.schema.string(),
-      relayToParent: tool.schema.boolean().optional(),
+      jobId: tool.schema.string(),
+      sendToParent: tool.schema.boolean().optional(),
     },
     async execute(args) {
-      return toPluginToolResult(await server.jobResult(args.jobID, args.relayToParent ?? false))
+      return toPluginToolResult(await server.jobResult(args.jobId, args.sendToParent ?? false))
     },
   }),
 })

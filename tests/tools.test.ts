@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { createMissionControlTools } from "../src/tools.ts"
 
-describe("mission_control_session_search tool", () => {
+describe("mc_session_search tool", () => {
   test("exposes the simplified public argument surface", async () => {
     const calls: unknown[] = []
 
@@ -28,72 +28,72 @@ describe("mission_control_session_search tool", () => {
       },
     } as any)
 
-    const searchTool = tools.mission_control_session_search
-    expect(Object.keys(searchTool.args).sort()).toEqual(["exact", "global", "limit", "query", "sessionID"].sort())
+    const searchTool = tools.mc_session_search
+    expect(Object.keys(searchTool.args).sort()).toEqual(["exact", "limit", "query", "scope", "sessionId"].sort())
 
     await searchTool.execute({
       query: "CTF",
-      sessionID: "ses_123",
-      global: true,
+      sessionId: "ses_123",
+      scope: "global",
       exact: true,
       limit: 7,
     } as any, {} as any)
 
     expect(calls).toEqual([
-      {
-        query: "CTF",
-        sessionID: "ses_123",
-        global: true,
-        exact: true,
-        limit: 7,
-      },
+        {
+          query: "CTF",
+          sessionId: "ses_123",
+          scope: "global",
+          exact: true,
+          limit: 7,
+        },
     ])
   })
 })
 
-describe("mission_control_session_read tool", () => {
-  test("forwards beforeMessageID to the session service", async () => {
+describe("mc_session_read tool", () => {
+  test("forwards beforeMessageId to the session service", async () => {
     const calls: unknown[] = []
 
     const tools = createMissionControlTools({
       config: DEFAULT_CONFIG,
-      async readSession(sessionID: string, options: unknown) {
-        calls.push({ sessionID, options })
+      async readSession(sessionId: string, options: unknown) {
+        calls.push({ sessionId, options })
         return {
           ok: true,
           data: {
-            sessionID,
+            sessionId,
             entries: [],
-            includedChildSessionIDs: [],
+            includedChildSessionIds: [],
           },
         }
       },
     } as any)
 
-    const readTool = tools.mission_control_session_read
+    const readTool = tools.mc_session_read
     expect(Object.keys(readTool.args).sort()).toEqual(
-      ["beforeMessageID", "includeChildren", "includeToolOutputs", "limit", "sessionID"].sort(),
+      ["beforeMessageId", "limit", "sessionId", "withChildren", "withToolOutputs"].sort(),
     )
 
     await readTool.execute(
       {
-        sessionID: "ses_123",
-        beforeMessageID: "msg_7",
+        sessionId: "ses_123",
+        beforeMessageId: "msg_7",
         limit: 4,
-        includeChildren: true,
-        includeToolOutputs: false,
+        withChildren: true,
+        withToolOutputs: false,
       } as any,
       {} as any,
     )
 
     expect(calls).toEqual([
       {
-        sessionID: "ses_123",
+        sessionId: "ses_123",
         options: {
-          beforeMessageID: "msg_7",
+          beforeMessageId: "msg_7",
           limit: 4,
-          includeChildren: true,
-          includeToolOutputs: false,
+          withChildren: true,
+          withToolOutputs: false,
         },
       },
     ])

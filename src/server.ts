@@ -190,32 +190,32 @@ export class MissionControlServer {
   }
 
   async readSession(
-    sessionID: string,
+    sessionId: string,
     options: {
-      beforeMessageID?: string
+      beforeMessageId?: string
       limit?: number
-      includeChildren?: boolean
-      includeToolOutputs?: boolean
+      withChildren?: boolean
+      withToolOutputs?: boolean
     },
   ) {
     const adapter = this.adapter
-    return this.sessionService.readSession(adapter, sessionID, options)
+    return this.sessionService.readSession(adapter, sessionId, options)
   }
 
-  async sessionTree(sessionID: string, depth = 1) {
+  async sessionTree(sessionId: string, depth = 1) {
     const adapter = this.adapter
-    return this.sessionService.sessionTree(adapter, sessionID, depth)
+    return this.sessionService.sessionTree(adapter, sessionId, depth)
   }
 
   async observeSession(
-    sessionID: string,
+    sessionId: string,
     options: {
-      includeChildren?: boolean
-      eventLimit?: number
+      withChildren?: boolean
+      limit?: number
     },
   ) {
     const adapter = this.adapter
-    return this.sessionService.observeSession(adapter, sessionID, options)
+    return this.sessionService.observeSession(adapter, sessionId, options)
   }
 
   async searchSessions(args: import("./types.js").SessionSearchArgs) {
@@ -242,9 +242,9 @@ export class MissionControlServer {
     return this.jobController.cancelJob(adapter, jobID)
   }
 
-  async jobResult(jobID: string, relayToParent: boolean) {
+  async jobResult(jobID: string, sendToParent: boolean) {
     const adapter = this.adapter
-    return this.jobController.getResult(adapter, jobID, relayToParent)
+    return this.jobController.getResult(adapter, jobID, sendToParent)
   }
 
   notImplemented(feature: string, suggestion?: string) {

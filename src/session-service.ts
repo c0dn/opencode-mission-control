@@ -16,30 +16,30 @@ export class MissionControlSessionService {
 
   async readSession(
     adapter: OpenCodeAdapter,
-    sessionID: string,
+    sessionId: string,
     options: {
-      beforeMessageID?: string
+      beforeMessageId?: string
       limit?: number
-      includeChildren?: boolean
-      includeToolOutputs?: boolean
+      withChildren?: boolean
+      withToolOutputs?: boolean
     },
   ): Promise<ToolResult<SessionReadResult>> {
     const relatedSessions: Array<{ sessionID: string; directory?: string }> = []
 
     try {
-      const resolved = await adapter.resolveSession(sessionID)
+      const resolved = await adapter.resolveSession(sessionId)
       relatedSessions.push({
-        sessionID,
+        sessionID: sessionId,
         directory: resolved.directory ?? extractDirectory(resolved.session),
       })
     } catch {
-      return fail("ParentSessionNotFound", `Session '${sessionID}' was not found.`)
+      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
     }
 
-    if (options.includeChildren) {
+    if (options.withChildren) {
       try {
         const parentDirectory = relatedSessions[0]?.directory
-        const children = await adapter.getSessionChildren(sessionID, parentDirectory)
+        const children = await adapter.getSessionChildren(sessionId, parentDirectory)
         for (const child of children) {
           const childID = extractSessionID(child)
           if (childID) {
@@ -53,8 +53,8 @@ export class MissionControlSessionService {
       } catch {
         return fail(
           "CurrentSessionUnavailable",
-          `Failed to load child sessions for '${sessionID}'.`,
-          "Retry the read, or retry without includeChildren if the runtime is unstable.",
+          `Failed to load child sessions for '${sessionId}'.`,
+          "Retry the read, or retry without withChildren if the runtime is unstable.",
         )
       }
     }
@@ -81,14 +81,14 @@ export class MissionControlSessionService {
     }
 
     messages.sort((left, right) => left.createdAt - right.createdAt)
-    const cursorIndex = options.beforeMessageID
-      ? messages.findIndex(({ message }) => getMessageID(message) === options.beforeMessageID)
+    const cursorIndex = options.beforeMessageId
+      ? messages.findIndex(({ message }) => getMessageID(message) === options.beforeMessageId)
       : -1
     const cursorScopedMessages = cursorIndex >= 0 ? messages.slice(0, cursorIndex) : messages
 
     const entries: SessionTranscriptEntry[] = []
     for (const { sessionID, message } of cursorScopedMessages) {
-      const normalized = normalizeMessage(sessionID, message, options.includeToolOutputs ?? false)
+      const normalized = normalizeMessage(sessionID, message, options.withToolOutputs ?? false)
       if (normalized) {
         entries.push(normalized)
       }
@@ -98,20 +98,20 @@ export class MissionControlSessionService {
     const boundedEntries = typeof options.limit === "number" ? entries.slice(-options.limit) : entries
 
     return ok({
-      sessionID,
+      sessionId,
       entries: boundedEntries,
-      includedChildSessionIDs: relatedSessions.slice(1).map((session) => session.sessionID),
+      includedChildSessionIds: relatedSessions.slice(1).map((session) => session.sessionID),
     })
   }
 
-  async sessionTree(adapter: OpenCodeAdapter, sessionID: string, depth = 1): Promise<ToolResult<SessionTreeNode>> {
+  async sessionTree(adapter: OpenCodeAdapter, sessionId: string, depth = 1): Promise<ToolResult<SessionTreeNode>> {
     try {
-      const resolved = await adapter.resolveSession(sessionID)
+      const resolved = await adapter.resolveSession(sessionId)
 
       try {
         const node = await this.buildTree(
           adapter,
-          sessionID,
+          sessionId,
           Math.max(0, Math.trunc(depth)),
           resolved.session,
           resolved.directory,
@@ -120,47 +120,47 @@ export class MissionControlSessionService {
       } catch {
         return fail(
           "CurrentSessionUnavailable",
-          `Failed to build the tree for session '${sessionID}'.`,
+          `Failed to build the tree for session '${sessionId}'.`,
           "Retry after the runtime settles, or reduce the requested depth.",
         )
       }
     } catch {
-      return fail("ParentSessionNotFound", `Session '${sessionID}' was not found.`)
+      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
     }
   }
 
   async observeSession(
     adapter: OpenCodeAdapter,
-    sessionID: string,
+    sessionId: string,
     options: {
-      includeChildren?: boolean
-      eventLimit?: number
+      withChildren?: boolean
+      limit?: number
     },
   ): Promise<ToolResult<SessionObserveResult>> {
     let session: unknown
     let sessionDirectory: string | undefined
 
     try {
-      const resolved = await adapter.resolveSession(sessionID)
+      const resolved = await adapter.resolveSession(sessionId)
       session = resolved.session
       sessionDirectory = resolved.directory ?? extractDirectory(resolved.session)
     } catch {
-      return fail("ParentSessionNotFound", `Session '${sessionID}' was not found.`)
+      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
     }
 
-    const sessionIDs = new Set<string>([sessionID])
+    const sessionIDs = new Set<string>([sessionId])
     let childSummaries: SessionObserveResult["children"] = undefined
 
-    if (options.includeChildren) {
+    if (options.withChildren) {
       try {
-        const children = await adapter.getSessionChildren(sessionID, sessionDirectory)
+        const children = await adapter.getSessionChildren(sessionId, sessionDirectory)
         childSummaries = children.map((child) => {
           const childID = extractSessionID(child) ?? "unknown"
           const cachedMetadata = this.state.metadataForSession(childID)
           sessionIDs.add(childID)
 
           return {
-            sessionID: childID,
+            sessionId: childID,
             status: this.state.statusForSession(childID, extractStatus(child)),
             title: extractTitle(child) ?? cachedMetadata?.title,
           }
@@ -168,17 +168,17 @@ export class MissionControlSessionService {
       } catch {
         return fail(
           "CurrentSessionUnavailable",
-          `Failed to load child sessions for '${sessionID}'.`,
-          "Retry without includeChildren if you only need the parent session state.",
+          `Failed to load child sessions for '${sessionId}'.`,
+          "Retry without withChildren if you only need the parent session state.",
         )
       }
     }
 
-    const rawEventLimit = options.eventLimit ?? 20
+    const rawEventLimit = options.limit ?? 20
 
     return ok({
-      sessionID,
-      status: this.state.statusForSession(sessionID, extractStatus(session)),
+      sessionId,
+      status: this.state.statusForSession(sessionId, extractStatus(session)),
       recentEvents: this.state.recentEventsForSessions(sessionIDs, rawEventLimit),
       children: childSummaries,
     })
@@ -186,19 +186,19 @@ export class MissionControlSessionService {
 
   private async buildTree(
     adapter: OpenCodeAdapter,
-    sessionID: string,
+    sessionId: string,
     depth: number,
     seededSession?: unknown,
     seededDirectory?: string,
   ): Promise<SessionTreeNode> {
-    const session = seededSession ?? (await adapter.getSession(sessionID, seededDirectory))
-    const cachedMetadata = this.state.metadataForSession(sessionID)
+    const session = seededSession ?? (await adapter.getSession(sessionId, seededDirectory))
+    const cachedMetadata = this.state.metadataForSession(sessionId)
     const sessionDirectory = extractDirectory(session) ?? cachedMetadata?.directory ?? seededDirectory
     const node: SessionTreeNode = {
-      sessionID,
+      sessionId,
       title: extractTitle(session) ?? cachedMetadata?.title,
-      parentSessionID: extractParentSessionID(session) ?? cachedMetadata?.parentSessionID,
-      status: this.state.statusForSession(sessionID, extractStatus(session)),
+      parentSessionId: extractParentSessionID(session) ?? cachedMetadata?.parentSessionId,
+      status: this.state.statusForSession(sessionId, extractStatus(session)),
       children: [],
     }
 
@@ -206,7 +206,7 @@ export class MissionControlSessionService {
       return node
     }
 
-    const children = await adapter.getSessionChildren(sessionID, sessionDirectory)
+    const children = await adapter.getSessionChildren(sessionId, sessionDirectory)
     for (const child of children) {
       const childID = extractSessionID(child)
       if (!childID) {

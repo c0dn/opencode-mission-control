@@ -1,23 +1,23 @@
-# `mission_control_job_list`
+# `mc_job_list`
 
 Lists tracked background jobs.
 
 ## Call
 
 ```text
-mission_control_job_list(parentSessionID?, state?, limit?)
+mc_job_list({ sessionId?, state?, limit? })
 ```
 
 ## Arguments
 
-- `parentSessionID` — optional filter by parent session
+- `sessionId` — optional filter by parent session
 - `state` — optional filter by job state
 - `limit` — optional maximum number of jobs to return
 
 ## Example
 
 ```text
-mission_control_job_list(parentSessionID="ses_123", state="running", limit=20)
+mc_job_list({ sessionId: "ses_123", state: "running", limit: 20 })
 ```
 
 ## What it returns

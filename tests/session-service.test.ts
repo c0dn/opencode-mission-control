@@ -78,7 +78,7 @@ describe("MissionControlSessionService", () => {
     expect(globalListCalls).toBe(1)
   })
 
-  test("applies beforeMessageID before limit across parent and child transcript entries", async () => {
+  test("applies beforeMessageId before limit across parent and child transcript entries", async () => {
     const adapter = new OpenCodeAdapter({
       session: {
         async get({ path }: { path: { id: string } }) {
@@ -130,21 +130,21 @@ describe("MissionControlSessionService", () => {
 
     const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
     const result = await service.readSession(adapter, "root-session", {
-      beforeMessageID: "msg-4",
-      includeChildren: true,
+      beforeMessageId: "msg-4",
+      withChildren: true,
       limit: 2,
     })
 
     expect(result.ok).toBe(true)
     if (!result.ok) {
-      throw new Error("Expected session read with beforeMessageID to succeed")
+      throw new Error("Expected session read with beforeMessageId to succeed")
     }
 
-    expect(result.data.entries.map((entry) => entry.messageID)).toEqual(["msg-2", "msg-3"])
-    expect(result.data.includedChildSessionIDs).toEqual(["child-session"])
+    expect(result.data.entries.map((entry) => entry.messageId)).toEqual(["msg-2", "msg-3"])
+    expect(result.data.includedChildSessionIds).toEqual(["child-session"])
   })
 
-  test("treats beforeMessageID as a hard boundary even when the cursor message is filtered out", async () => {
+  test("treats beforeMessageId as a hard boundary even when the cursor message is filtered out", async () => {
     const adapter = new OpenCodeAdapter({
       session: {
         async get({ path }: { path: { id: string } }) {
@@ -183,8 +183,8 @@ describe("MissionControlSessionService", () => {
 
     const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
     const result = await service.readSession(adapter, "root-session", {
-      beforeMessageID: "msg-2",
-      includeToolOutputs: false,
+      beforeMessageId: "msg-2",
+      withToolOutputs: false,
     })
 
     expect(result.ok).toBe(true)
@@ -192,10 +192,10 @@ describe("MissionControlSessionService", () => {
       throw new Error("Expected filtered cursor session read to succeed")
     }
 
-    expect(result.data.entries.map((entry) => entry.messageID)).toEqual(["msg-1"])
+    expect(result.data.entries.map((entry) => entry.messageId)).toEqual(["msg-1"])
   })
 
-  test("uses cached child directories when includeChildren child records omit directory", async () => {
+  test("uses cached child directories when withChildren child records omit directory", async () => {
     const state = new MissionControlRuntimeState(20)
     state.recordEvent("session.created", {
       sessionID: "child-session",
@@ -249,7 +249,7 @@ describe("MissionControlSessionService", () => {
 
     const service = new MissionControlSessionService(state)
     const result = await service.readSession(adapter, "root-session", {
-      includeChildren: true,
+      withChildren: true,
     })
 
     expect(result.ok).toBe(true)
@@ -257,6 +257,6 @@ describe("MissionControlSessionService", () => {
       throw new Error("Expected cached-child-directory read to succeed")
     }
 
-    expect(result.data.entries.map((entry) => entry.messageID)).toEqual(["root-message", "child-message"])
+    expect(result.data.entries.map((entry) => entry.messageId)).toEqual(["root-message", "child-message"])
   })
 })

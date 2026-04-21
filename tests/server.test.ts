@@ -149,7 +149,7 @@ describe("MissionControlServer", () => {
     const localSearch = await server.searchSessions({ query: "local indexed content" })
     expect(localSearch.ok).toBe(true)
 
-    const globalSearch = await server.searchSessions({ query: "global indexed content", global: true })
+    const globalSearch = await server.searchSessions({ query: "global indexed content", scope: "global" })
     expect(globalSearch.ok).toBe(true)
 
     const status = await server.status()
@@ -369,7 +369,7 @@ describe("MissionControlServer", () => {
       { search: {} },
     )
 
-    const firstSearch = await serverA.searchSessions({ query: "global stale token", global: true })
+    const firstSearch = await serverA.searchSessions({ query: "global stale token", scope: "global" })
     expect(firstSearch.ok).toBe(true)
 
     revision = 2
@@ -385,7 +385,7 @@ describe("MissionControlServer", () => {
       { search: {} },
     )
 
-    const secondSearch = await serverB.searchSessions({ query: "global refreshed token", global: true })
+    const secondSearch = await serverB.searchSessions({ query: "global refreshed token", scope: "global" })
     expect(secondSearch.ok).toBe(true)
     if (!secondSearch.ok) {
       throw new Error("Expected cross-worktree global search to succeed")

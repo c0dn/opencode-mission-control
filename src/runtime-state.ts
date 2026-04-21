@@ -33,57 +33,57 @@ export class MissionControlRuntimeState {
     this.eventCounts.set(type, (this.eventCounts.get(type) ?? 0) + 1)
     this.trimBuffer()
 
-    if (record.sessionID && shouldRefreshSessionMetadata(type)) {
-      this.refreshSessionMetadata(record.sessionID, payload)
+    if (record.sessionId && shouldRefreshSessionMetadata(type)) {
+      this.refreshSessionMetadata(record.sessionId, payload)
     }
 
-    if (record.sessionID && shouldMarkSessionDirty(type)) {
-      this.dirtySessions.set(record.sessionID, Math.max((this.dirtySessions.get(record.sessionID) ?? 0) + 1, record.at))
+    if (record.sessionId && shouldMarkSessionDirty(type)) {
+      this.dirtySessions.set(record.sessionId, Math.max((this.dirtySessions.get(record.sessionId) ?? 0) + 1, record.at))
     }
 
-    if (!record.sessionID) {
+    if (!record.sessionId) {
       return
     }
 
     if (type === "session.idle") {
-      this.sessionStatuses.set(record.sessionID, "idle")
+      this.sessionStatuses.set(record.sessionId, "idle")
       return
     }
 
     if (type === "session.error") {
-      this.sessionStatuses.set(record.sessionID, "error")
+      this.sessionStatuses.set(record.sessionId, "error")
       return
     }
 
     if (type === "permission.asked") {
-      this.sessionStatuses.set(record.sessionID, "waiting_permission")
+      this.sessionStatuses.set(record.sessionId, "waiting_permission")
       return
     }
 
     if (type === "permission.replied") {
-      this.sessionStatuses.set(record.sessionID, "running")
+      this.sessionStatuses.set(record.sessionId, "running")
       return
     }
 
     if (type === "question.asked") {
-      this.sessionStatuses.set(record.sessionID, "waiting_question")
+      this.sessionStatuses.set(record.sessionId, "waiting_question")
       return
     }
 
     if (type === "question.replied") {
-      this.sessionStatuses.set(record.sessionID, "running")
+      this.sessionStatuses.set(record.sessionId, "running")
       return
     }
 
     if (type === "question.rejected") {
-      this.sessionStatuses.set(record.sessionID, "failed")
+      this.sessionStatuses.set(record.sessionId, "failed")
       return
     }
 
     if (type === "session.status") {
-      const status = extractStatus(payload)
-      if (status) {
-        this.sessionStatuses.set(record.sessionID, status)
+        const status = extractStatus(payload)
+        if (status) {
+        this.sessionStatuses.set(record.sessionId, status)
       }
     }
   }
@@ -136,17 +136,17 @@ export class MissionControlRuntimeState {
     const boundedLimit = Math.max(1, Math.trunc(limit))
 
     return this.recentEvents
-      .filter((event) => event.sessionID && scopedIDs.has(event.sessionID))
+      .filter((event) => event.sessionId && scopedIDs.has(event.sessionId))
       .slice(-boundedLimit)
       .reverse()
   }
 
   private normalizeEvent(type: string, payload: unknown): MissionControlEventRecord {
-    const sessionID = extractSessionID(payload)
+    const sessionId = extractSessionID(payload)
     return {
       type,
       at: Date.now(),
-      sessionID,
+      sessionId,
       summary: this.summarizeEvent(type, payload),
     }
   }
@@ -157,9 +157,9 @@ export class MissionControlRuntimeState {
       return `${type} (${status})`
     }
 
-    const sessionID = extractSessionID(payload)
-    if (sessionID) {
-      return `${type} for ${sessionID}`
+    const sessionId = extractSessionID(payload)
+    if (sessionId) {
+      return `${type} for ${sessionId}`
     }
 
     return type
@@ -188,11 +188,11 @@ export class MissionControlRuntimeState {
     return Object.fromEntries(Array.from(this.dirtySessions.entries()).filter(([sessionID]) => allowed.has(sessionID)))
   }
 
-  private refreshSessionMetadata(sessionID: string, payload: unknown) {
-    const previous = this.sessionMetadata.get(sessionID)
-    const parentSessionID = hasParentSessionReference(payload)
+  private refreshSessionMetadata(sessionId: string, payload: unknown) {
+    const previous = this.sessionMetadata.get(sessionId)
+    const parentSessionId = hasParentSessionReference(payload)
       ? extractParentSessionID(payload)
-      : previous?.parentSessionID
+      : previous?.parentSessionId
     const createdAt = extractSessionTimestamp(payload, "created") ?? previous?.createdAt
     const updatedAt = extractSessionTimestamp(payload, "updated") ?? previous?.updatedAt
     const previousVersion = previous?.updatedAt ?? previous?.createdAt
@@ -207,8 +207,8 @@ export class MissionControlRuntimeState {
     }
 
     const next: RuntimeSessionMetadata = {
-      sessionID,
-      parentSessionID,
+      sessionId,
+      parentSessionId,
       title: extractTitle(payload) ?? previous?.title,
       directory: extractDirectory(payload) ?? previous?.directory,
       createdAt,
@@ -217,7 +217,7 @@ export class MissionControlRuntimeState {
     }
 
     if (
-      !next.parentSessionID &&
+      !next.parentSessionId &&
       !next.title &&
       !next.directory &&
       next.createdAt === undefined &&
@@ -226,21 +226,21 @@ export class MissionControlRuntimeState {
       return
     }
 
-    if (previous?.parentSessionID && previous.parentSessionID !== next.parentSessionID) {
-      const previousChildren = this.childSessionIDsByParent.get(previous.parentSessionID)
-      previousChildren?.delete(sessionID)
+    if (previous?.parentSessionId && previous.parentSessionId !== next.parentSessionId) {
+      const previousChildren = this.childSessionIDsByParent.get(previous.parentSessionId)
+      previousChildren?.delete(sessionId)
       if (previousChildren && previousChildren.size === 0) {
-        this.childSessionIDsByParent.delete(previous.parentSessionID)
+        this.childSessionIDsByParent.delete(previous.parentSessionId)
       }
     }
 
-    if (next.parentSessionID) {
-      const siblings = this.childSessionIDsByParent.get(next.parentSessionID) ?? new Set<string>()
-      siblings.add(sessionID)
-      this.childSessionIDsByParent.set(next.parentSessionID, siblings)
+    if (next.parentSessionId) {
+      const siblings = this.childSessionIDsByParent.get(next.parentSessionId) ?? new Set<string>()
+      siblings.add(sessionId)
+      this.childSessionIDsByParent.set(next.parentSessionId, siblings)
     }
 
-    this.sessionMetadata.set(sessionID, next)
+    this.sessionMetadata.set(sessionId, next)
   }
 }
 

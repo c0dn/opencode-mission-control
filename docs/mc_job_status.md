@@ -1,17 +1,17 @@
-# `mission_control_job_status`
+# `mc_job_status`
 
 Returns the current lifecycle state for one tracked background job.
 
 ## Call
 
 ```text
-mission_control_job_status(jobID)
+mc_job_status({ jobId })
 ```
 
 ## Example
 
 ```text
-mission_control_job_status(jobID="job_123")
+mc_job_status({ jobId: "job_123" })
 ```
 
 ## What it returns

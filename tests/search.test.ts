@@ -89,7 +89,7 @@ describe("MissionControlSearchService", () => {
     const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
     const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
       query: "indexing status",
-      sessionID: "root-session",
+      sessionId: "root-session",
       includeChildren: true,
       limit: 5,
     })
@@ -100,7 +100,7 @@ describe("MissionControlSearchService", () => {
     }
 
     expect(result.data.matches).toHaveLength(1)
-    expect(result.data.matches[0]?.sessionID).toBe("child-session")
+    expect(result.data.matches[0]?.sessionId).toBe("child-session")
     expect(result.data.matches[0]?.snippet).toContain("indexing status")
     expect(result.data.effectiveMode).toBe("lexical")
   })
@@ -171,7 +171,7 @@ describe("MissionControlSearchService", () => {
     const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
     const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
       query: "descendant-only token",
-      sessionID: "root-session",
+      sessionId: "root-session",
       limit: 5,
     })
 
@@ -181,7 +181,7 @@ describe("MissionControlSearchService", () => {
     }
 
     expect(result.data.matches).toHaveLength(1)
-    expect(result.data.matches[0]?.sessionID).toBe("child-session")
+    expect(result.data.matches[0]?.sessionId).toBe("child-session")
   })
 
   test("supports alternate session parent and timestamp shapes during indexing", async () => {
@@ -232,7 +232,7 @@ describe("MissionControlSearchService", () => {
     const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
     const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
       query: "alternate-shape token",
-      sessionID: "root-session",
+      sessionId: "root-session",
       limit: 5,
     })
 
@@ -242,7 +242,7 @@ describe("MissionControlSearchService", () => {
     }
 
     expect(result.data.matches).toHaveLength(1)
-    expect(result.data.matches[0]?.sessionID).toBe("child-session")
+    expect(result.data.matches[0]?.sessionId).toBe("child-session")
   })
 
   test("uses a true global discovery scope when the global flag is enabled", async () => {
@@ -325,7 +325,7 @@ describe("MissionControlSearchService", () => {
 
     const globalResult = await service.search(adapter, config, directory, {
       query: "rareglobaltoken",
-      global: true,
+      scope: "global",
     })
 
     expect(globalResult.ok).toBe(true)
@@ -335,7 +335,7 @@ describe("MissionControlSearchService", () => {
 
     expect(globalResult.data.discoveryScope).toBe("global_unscoped")
     expect(globalResult.data.indexedSessionCount).toBe(2)
-    expect(globalResult.data.matches[0]?.sessionID).toBe("global-session")
+    expect(globalResult.data.matches[0]?.sessionId).toBe("global-session")
     expect(globalResult.data.indexPath).toContain("global_unscoped")
     expect(globalResult.data.indexPath).not.toBe(scopedResult.data.indexPath)
   })
@@ -787,7 +787,7 @@ describe("MissionControlSearchService", () => {
     }
 
     expect(result.data.matches).toHaveLength(1)
-    expect(result.data.matches[0]?.sessionID).toBe("exact-text-session")
+    expect(result.data.matches[0]?.sessionId).toBe("exact-text-session")
     expect(result.data.matches[0]?.matchType).toBe("exact")
     expect(result.data.warnings).toEqual([])
   })
@@ -987,7 +987,7 @@ describe("MissionControlSearchService", () => {
     }
 
     expect(result.data.effectiveMode).toBe("semantic")
-    expect(result.data.matches[0]?.sessionID).toBe("session-a")
+    expect(result.data.matches[0]?.sessionId).toBe("session-a")
   })
 
   test("reuses a persisted query embedding for repeated semantic searches with the same query", async () => {
@@ -1506,7 +1506,7 @@ describe("MissionControlSearchService", () => {
     const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
     const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
       query: "anything",
-      global: true,
+      scope: "global",
     })
 
     expect(result.ok).toBe(false)
@@ -1579,7 +1579,7 @@ describe("MissionControlSearchService", () => {
 
     const globalResult = await service.search(adapter, config, directory, {
       query: "global-session content",
-      global: true,
+      scope: "global",
     })
     expect(globalResult.ok).toBe(true)
     if (!globalResult.ok) {
@@ -1650,7 +1650,7 @@ describe("MissionControlSearchService", () => {
 
     const globalResult = await service.search(adapter, config, directory, {
       query: "global-session content",
-      global: true,
+      scope: "global",
     })
     expect(globalResult.ok).toBe(true)
     if (!globalResult.ok) {

@@ -105,8 +105,8 @@ describe("MissionControlRuntimeState", () => {
     })
 
     expect(state.metadataForSession("child-session")).toMatchObject({
-      sessionID: "child-session",
-      parentSessionID: "parent-a",
+      sessionId: "child-session",
+      parentSessionId: "parent-a",
       title: "Child Session",
       directory: "/tmp/project-a",
       createdAt: 1,
@@ -122,7 +122,7 @@ describe("MissionControlRuntimeState", () => {
     })
 
     expect(state.metadataForSession("child-session")).toMatchObject({
-      parentSessionID: "parent-b",
+      parentSessionId: "parent-b",
       title: "Child Session Renamed",
       updatedAt: 3,
     })
@@ -135,7 +135,7 @@ describe("MissionControlRuntimeState", () => {
       time: { updated: 4 },
     })
 
-    expect(state.metadataForSession("child-session")?.parentSessionID).toBeUndefined()
+    expect(state.metadataForSession("child-session")?.parentSessionId).toBeUndefined()
     expect(state.childSessionIDs("parent-b")).toEqual([])
 
     state.recordEvent("session.updated", {

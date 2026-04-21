@@ -1,4 +1,4 @@
-# `mission_control_status`
+# `mc_status`
 
 Returns the current Mission Control runtime summary.
 
@@ -7,13 +7,13 @@ Returns the current Mission Control runtime summary.
 - confirming the plugin is loaded
 - checking whether search/jobs are enabled
 - checking whether semantic retrieval is available
-- quick debugging of runtime config/counters
+- quick debugging of runtime config and counters
 - seeing which search index snapshot is currently active
 
 ## Call
 
 ```text
-mission_control_status()
+mc_status()
 ```
 
 ## Output
@@ -29,7 +29,7 @@ The payload currently includes:
 - `capabilities`
 - `index`
 
-The `index` object includes:
+The `index` object includes fields such as:
 
 - `path`
 - `builtAt`
@@ -42,6 +42,6 @@ The `index` object includes:
 
 ## Caveats
 
-- It is still a runtime health/capability probe first; it does not return search matches.
+- This is a runtime health and capability probe first; it does not return search matches.
 - `dirtySessionCount` is scoped to the sessions in the current index snapshot, not every dirty session Mission Control has seen.
 - If no search has been built yet, `builtAt`, `discoveryScope`, and `indexedSessionCount` may be absent until the first indexed search runs.

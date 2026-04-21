@@ -40,6 +40,26 @@ describe("createMissionControlConfig", () => {
 
     expect(config.safety.requireExplicitParentOnAmbiguousAttach).toBe(true)
   })
+
+  test("forces caller-session auto-attach on in v2", () => {
+    const config = createMissionControlConfig({
+      jobs: {
+        autoAttachToCurrentSession: false,
+      },
+    })
+
+    expect(config.jobs.autoAttachToCurrentSession).toBe(true)
+  })
+
+  test("normalizes legacy relay modes to manual", () => {
+    const config = createMissionControlConfig({
+      jobs: {
+        autoRelayToParent: "manual_only" as never,
+      },
+    })
+
+    expect(config.jobs.autoRelayToParent).toBe("manual")
+  })
 })
 
 describe("clampResultLimit", () => {

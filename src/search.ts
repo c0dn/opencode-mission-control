@@ -37,20 +37,21 @@ export class MissionControlSearchService {
     args: SearchExecutionArgs,
     semanticProvider?: SemanticEmbeddingProvider,
   ): Promise<ToolResult<SessionSearchResult>> {
+    const useGlobalScope = args.scope === "global"
     const discovery: SearchIndexDocument["discovery"] = {
-      scope: args.global ? "global_unscoped" : "current_directory",
-      directory: args.global ? undefined : rootDir,
+      scope: useGlobalScope ? "global_unscoped" : "current_directory",
+      directory: useGlobalScope ? undefined : rootDir,
     }
 
     let sessions
     try {
-      sessions = await this.sourceDB.listSessions(adapter, { global: args.global })
+      sessions = await this.sourceDB.listSessions(adapter, { global: useGlobalScope })
     } catch (error) {
       if (error instanceof GlobalSessionDiscoveryError) {
         return fail(
           "GlobalSessionDiscoveryUnavailable",
           "Mission Control could not enumerate sessions outside the current directory scope.",
-          "Retry without global=true or restart OpenCode with the plugin loaded normally.",
+          "Retry with scope='local' or restart OpenCode with the plugin loaded normally.",
         )
       }
 
@@ -118,8 +119,8 @@ export class MissionControlSearchService {
     if (effectiveMode === "lexical") {
       const matches = lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit)
       this.addExactCandidateWarning(args, warnings, matches)
-      return ok({
-        query: args.query,
+        return ok({
+          query: args.query,
         requestedMode,
         effectiveMode,
         builtAt: index.builtAt,
@@ -128,16 +129,16 @@ export class MissionControlSearchService {
         discoveryDirectory: index.discovery.directory,
         indexedSessionCount: index.sessions.length,
         warnings,
-        matches,
-      })
+          matches,
+        })
     }
 
     if (!semanticProvider) {
       warnings.push("Semantic provider is not configured; returning lexical results only.")
       const matches = lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit)
       this.addExactCandidateWarning(args, warnings, matches)
-      return ok({
-        query: args.query,
+        return ok({
+          query: args.query,
         requestedMode,
         effectiveMode: "lexical",
         builtAt: index.builtAt,
@@ -146,8 +147,8 @@ export class MissionControlSearchService {
         discoveryDirectory: index.discovery.directory,
         indexedSessionCount: index.sessions.length,
         warnings,
-        matches,
-      })
+          matches,
+        })
     }
 
     try {
@@ -547,9 +548,9 @@ export class MissionControlSearchService {
         }
 
         matches.push({
-          sessionID: chunk.sessionID,
-          messageID: chunk.messageID,
-          partID: chunk.partID,
+          sessionId: chunk.sessionID,
+          messageId: chunk.messageID,
+          partId: chunk.partID,
           score: dot(queryVector, vector),
           matchType: "candidate",
           title: sessionMap.get(chunk.sessionID)?.title,
@@ -571,8 +572,8 @@ export class MissionControlSearchService {
     lexicalEnabled: boolean,
   ) {
     const scopedSessionIDs = this.sourceDB.collectScopedSessionIDs(index.sessions, {
-      sessionID: args.sessionID,
-      includeChildren: args.includeChildren ?? Boolean(args.sessionID),
+      sessionId: args.sessionId,
+      includeChildren: args.includeChildren ?? Boolean(args.sessionId),
     })
     const sessionMap = new Map(index.sessions.map((session) => [session.sessionID, session]))
     const scopedChunks = index.chunks
@@ -706,9 +707,9 @@ export class MissionControlSearchService {
     }
 
     return {
-      sessionID: chunk.sessionID,
-      messageID: chunk.messageID,
-      partID: chunk.partID,
+      sessionId: chunk.sessionID,
+      messageId: chunk.messageID,
+      partId: chunk.partID,
       score,
       matchType: isExactMatch ? "exact" : "candidate",
       title,
@@ -777,7 +778,7 @@ const tokenize = (query: string) =>
     .map((part) => part.trim())
     .filter((part) => part.length > 0)
 
-const getMatchKey = (match: SessionSearchMatch) => `${match.sessionID}:${match.messageID}:${match.partID ?? "root"}`
+const getMatchKey = (match: SessionSearchMatch) => `${match.sessionId}:${match.messageId}:${match.partId ?? "root"}`
 
 const compareSearchMatches = (left: SessionSearchMatch, right: SessionSearchMatch) =>
   Number(right.matchType === "exact") - Number(left.matchType === "exact") ||
