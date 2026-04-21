@@ -1,11 +1,18 @@
-import { normalizeMessage } from "./session-extractors.js"
+import {
+  extractDirectory,
+  extractParentSessionID,
+  extractSessionID,
+  extractSessionTimestamp,
+  extractTitle,
+  normalizeMessage,
+} from "./session-extractors.js"
 import type { SessionTranscriptEntry } from "./types.js"
 import { OpenCodeAdapter } from "./opencode-client.js"
 
 export interface SourceSessionRecord {
   sessionID: string
   title: string
-  directory: string
+  directory?: string
   parentSessionID?: string
   createdAt: number
   updatedAt: number
@@ -15,14 +22,23 @@ export class MissionControlSourceDB {
   async listSessions(adapter: OpenCodeAdapter, options: { global?: boolean } = {}): Promise<SourceSessionRecord[]> {
     const sessions = await adapter.listSessions(options)
 
-    return sessions.map((session: any) => ({
-      sessionID: session.id,
-      title: typeof session.title === "string" ? session.title : "Untitled session",
-      directory: typeof session.directory === "string" ? session.directory : "",
-      parentSessionID: typeof session.parentID === "string" ? session.parentID : undefined,
-      createdAt: typeof session?.time?.created === "number" ? session.time.created : Date.now(),
-      updatedAt: typeof session?.time?.updated === "number" ? session.time.updated : Date.now(),
-    }))
+    return sessions.flatMap((session: any) => {
+      const sessionID = extractSessionID(session)
+      if (!sessionID) {
+        return []
+      }
+
+      return [
+        {
+          sessionID,
+          title: extractTitle(session) ?? "Untitled session",
+          directory: extractDirectory(session) ?? (options.global ? "" : undefined),
+          parentSessionID: extractParentSessionID(session),
+          createdAt: extractSessionTimestamp(session, "created") ?? Date.now(),
+          updatedAt: extractSessionTimestamp(session, "updated") ?? Date.now(),
+        },
+      ]
+    })
   }
 
   async readSessionEntries(

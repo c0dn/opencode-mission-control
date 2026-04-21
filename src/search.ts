@@ -116,6 +116,8 @@ export class MissionControlSearchService {
     const lexicalMatches = initialScope.lexicalMatches
 
     if (effectiveMode === "lexical") {
+      const matches = lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit)
+      this.addExactCandidateWarning(args, warnings, matches)
       return ok({
         query: args.query,
         requestedMode,
@@ -126,12 +128,14 @@ export class MissionControlSearchService {
         discoveryDirectory: index.discovery.directory,
         indexedSessionCount: index.sessions.length,
         warnings,
-        matches: lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit),
+        matches,
       })
     }
 
     if (!semanticProvider) {
       warnings.push("Semantic provider is not configured; returning lexical results only.")
+      const matches = lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit)
+      this.addExactCandidateWarning(args, warnings, matches)
       return ok({
         query: args.query,
         requestedMode,
@@ -142,7 +146,7 @@ export class MissionControlSearchService {
         discoveryDirectory: index.discovery.directory,
         indexedSessionCount: index.sessions.length,
         warnings,
-        matches: lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit),
+        matches,
       })
     }
 
@@ -174,6 +178,9 @@ export class MissionControlSearchService {
           ? semanticMatches
           : this.combineHybridMatches(finalScope.lexicalMatches, semanticMatches)
 
+      const limitedMatches = matches.slice(0, args.limit ?? config.search.defaultResultLimit)
+      this.addExactCandidateWarning(args, warnings, limitedMatches)
+
       return ok({
         query: args.query,
         requestedMode,
@@ -184,7 +191,7 @@ export class MissionControlSearchService {
         discoveryDirectory: queryEmbedding.index.discovery.directory,
         indexedSessionCount: queryEmbedding.index.sessions.length,
         warnings,
-        matches: matches.slice(0, args.limit ?? config.search.defaultResultLimit),
+        matches: limitedMatches,
       })
     } catch (error) {
       warnings.push(
@@ -199,6 +206,8 @@ export class MissionControlSearchService {
         )
       }
 
+      const matches = lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit)
+      this.addExactCandidateWarning(args, warnings, matches)
       return ok({
         query: args.query,
         requestedMode,
@@ -209,7 +218,7 @@ export class MissionControlSearchService {
         discoveryDirectory: index.discovery.directory,
         indexedSessionCount: index.sessions.length,
         warnings,
-        matches: lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit),
+        matches,
       })
     }
   }
@@ -542,6 +551,7 @@ export class MissionControlSearchService {
           messageID: chunk.messageID,
           partID: chunk.partID,
           score: dot(queryVector, vector),
+          matchType: "candidate",
           title: sessionMap.get(chunk.sessionID)?.title,
           snippet: createSearchSnippet(chunk.text, query),
           role: chunk.role,
@@ -550,7 +560,7 @@ export class MissionControlSearchService {
         })
     }
 
-    return matches.sort((left, right) => right.score - left.score || right.createdAt - left.createdAt)
+    return matches.sort(compareSearchMatches)
   }
 
   private buildScopedSearchView(
@@ -585,7 +595,7 @@ export class MissionControlSearchService {
     return chunks
       .map((chunk) => this.scoreChunk(chunk, sessionMap.get(chunk.sessionID)?.title, queryTerms, normalizedQuery))
       .filter((match): match is SessionSearchMatch => Boolean(match))
-      .sort((left, right) => right.score - left.score || right.createdAt - left.createdAt)
+      .sort(compareSearchMatches)
   }
 
   private combineHybridMatches(lexicalMatches: SessionSearchMatch[], semanticMatches: SessionSearchMatch[]) {
@@ -615,18 +625,19 @@ export class MissionControlSearchService {
 
       combined.set(key, {
         ...previous,
+        matchType: previous.matchType === "exact" || match.matchType === "exact" ? "exact" : "candidate",
         score: previous.score * 0.45 + semanticScore * 0.55,
       })
     }
 
-    return Array.from(combined.values()).sort((left, right) => right.score - left.score || right.createdAt - left.createdAt)
+    return Array.from(combined.values()).sort(compareSearchMatches)
   }
 
   private matchesFilters(
     chunk: SessionChunk,
     session:
       | {
-          directory: string
+          directory?: string
         }
       | undefined,
     args: SearchExecutionArgs,
@@ -656,6 +667,8 @@ export class MissionControlSearchService {
     const text = chunk.text.toLowerCase()
     const normalizedTitle = (title ?? "").toLowerCase()
     const toolName = (chunk.toolName ?? "").toLowerCase()
+    const textHasExactQuery = hasExactLexicalMatch(text, query)
+    const isExactMatch = textHasExactQuery || toolName === query
 
     let score = 0
     if (text.includes(query)) {
@@ -668,6 +681,10 @@ export class MissionControlSearchService {
 
     if (toolName === query) {
       score += 6
+    }
+
+    if (isExactMatch) {
+      score += 100
     }
 
     for (const term of queryTerms) {
@@ -693,12 +710,29 @@ export class MissionControlSearchService {
       messageID: chunk.messageID,
       partID: chunk.partID,
       score,
+      matchType: isExactMatch ? "exact" : "candidate",
       title,
       snippet: createSearchSnippet(chunk.text, fullQuery),
       role: chunk.role,
       partType: chunk.partType,
       createdAt: chunk.createdAt,
     }
+  }
+
+  private addExactCandidateWarning(
+    args: SearchExecutionArgs,
+    warnings: string[],
+    matches: SessionSearchMatch[],
+  ) {
+    if (!args.exact || matches.length === 0) {
+      return
+    }
+
+    if (matches.some((match) => match.matchType === "exact")) {
+      return
+    }
+
+    warnings.push("No exact lexical hits were found; returning ranked lexical candidates instead.")
   }
 }
 
@@ -745,6 +779,11 @@ const tokenize = (query: string) =>
 
 const getMatchKey = (match: SessionSearchMatch) => `${match.sessionID}:${match.messageID}:${match.partID ?? "root"}`
 
+const compareSearchMatches = (left: SessionSearchMatch, right: SessionSearchMatch) =>
+  Number(right.matchType === "exact") - Number(left.matchType === "exact") ||
+  right.score - left.score ||
+  right.createdAt - left.createdAt
+
 const MAX_CACHED_QUERY_VECTORS = 128
 
 const dot = (left: number[], right: number[]) => {
@@ -767,6 +806,41 @@ const fingerprintText = (text: string) => {
   }
 
   return `fnv1a:${hash >>> 0}:${text.length}`
+}
+
+const hasExactLexicalMatch = (haystack: string, query: string) => {
+  if (!haystack || !query) {
+    return false
+  }
+
+  const tokenBoundaryClass = getTokenBoundaryClass(query)
+  const pattern = new RegExp(`(^|[^${tokenBoundaryClass}])${escapeRegExp(query)}($|[^${tokenBoundaryClass}])`, "iu")
+  return pattern.test(haystack)
+}
+
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+
+const getTokenBoundaryClass = (query: string) => {
+  const extras = new Set<string>()
+  for (const character of ["/", "-", ".", "_"]) {
+    if (query.includes(character)) {
+      extras.add(escapeCharClassCharacter(character))
+    }
+  }
+
+  return `\\p{L}\\p{N}_${extras.size > 0 ? `${Array.from(extras).join("")}` : ""}`
+}
+
+const escapeCharClassCharacter = (value: string) => {
+  if (value === "-" || value === "]" || value === "\\") {
+    return `\\${value}`
+  }
+
+  if (value === ".") {
+    return "\\."
+  }
+
+  return value
 }
 
 const trimSemanticQueryCache = (

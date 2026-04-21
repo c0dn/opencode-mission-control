@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises"
+import { createHash } from "node:crypto"
+import { mkdtemp, readFile, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -34,6 +35,14 @@ const parentSessionHandlers = (directory: string) => ({
     }
   },
 })
+
+const getJobsStorePath = (directory: string) =>
+  join(
+    process.env.XDG_CACHE_HOME?.trim() || join(process.env.HOME || tmpdir(), ".cache"),
+    "opencode-mission-control",
+    createHash("sha1").update(directory).digest("hex").slice(0, 16),
+    "jobs.json",
+  )
 
 describe("MissionControl background jobs", () => {
   test("launches a child session and captures an idle result snapshot", async () => {
@@ -105,6 +114,64 @@ describe("MissionControl background jobs", () => {
     expect(status.data.job.lastObservedEvent).toBe("session.idle")
   })
 
+  test("treats session.status=idle the same as session.idle for finalization", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-status-idle", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "status-idle-message", role: "assistant", time: { created: 10 } },
+              parts: [{ id: "status-idle-part", type: "text", text: "Finished through status idle." }],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig()
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Status idle finalize",
+      prompt: "Finalize from session.status idle.",
+      parentSessionID: "parent-session",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "session.status", {
+      sessionID: "child-status-idle",
+      status: { type: "idle" },
+    })
+
+    const status = controller.status(launchResult.data.jobID)
+    expect(status.ok).toBe(true)
+    if (!status.ok) {
+      throw new Error("Expected status-idle job to exist")
+    }
+
+    expect(status.data.job.state).toBe("completed")
+    expect(status.data.result?.state).toBe("completed")
+  })
+
   test("auto-attaches to the current session when no explicit parentSessionID is provided", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
@@ -166,6 +233,136 @@ describe("MissionControl background jobs", () => {
     expect(createdParentID).toBe("current-session")
   })
 
+  test("reserves concurrency slots during launch so overlapping starts cannot exceed maxConcurrent", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    let releaseParentResolution: (() => void) | undefined
+    const parentResolutionBlocked = new Promise<void>((resolve) => {
+      releaseParentResolution = resolve
+    })
+
+    let resolveCalls = 0
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async get({ path }: { path: { id: string } }) {
+          resolveCalls += 1
+          if (resolveCalls === 1) {
+            await parentResolutionBlocked
+          }
+
+          return {
+            id: path.id,
+            directory,
+            title: "Parent Session",
+            time: { created: 1, updated: 2 },
+          }
+        },
+        async create() {
+          return { id: `child-${resolveCalls}`, directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return []
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig({
+      jobs: {
+        maxConcurrent: 1,
+      },
+    })
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const firstLaunch = launcher.launch(adapter, {
+      title: "First launch",
+      prompt: "Hold the slot briefly.",
+      parentSessionID: "parent-session",
+    })
+
+    await Promise.resolve()
+
+    const secondLaunch = await launcher.launch(adapter, {
+      title: "Second launch",
+      prompt: "This should be rejected while the first slot is reserved.",
+      parentSessionID: "parent-session",
+    })
+
+    expect(secondLaunch.ok).toBe(false)
+    if (secondLaunch.ok) {
+      throw new Error("Expected second launch to fail the concurrency gate")
+    }
+    expect(secondLaunch.error.code).toBe("JobLaunchFailed")
+
+    releaseParentResolution?.()
+
+    const firstResult = await firstLaunch
+    expect(firstResult.ok).toBe(true)
+  })
+
+  test("rolls back a queued job cleanly when initial job persistence fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "should-not-launch", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return []
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig()
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const originalPersist = (controller as any).persist.bind(controller)
+    let persistCalls = 0
+    ;(controller as any).persist = async () => {
+      persistCalls += 1
+      if (persistCalls === 1) {
+        throw new Error("persist failed")
+      }
+
+      return originalPersist()
+    }
+
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+    const launchResult = await launcher.launch(adapter, {
+      title: "Rollback queued job",
+      prompt: "This launch should fail before the queued job sticks.",
+      parentSessionID: "parent-session",
+    })
+
+    expect(launchResult.ok).toBe(false)
+    expect(controller.getActiveJobCount()).toBe(0)
+
+    const jobs = controller.listJobs()
+    expect(jobs.ok).toBe(true)
+    if (!jobs.ok) {
+      throw new Error("Expected job list to be readable")
+    }
+
+    expect(jobs.data).toHaveLength(0)
+  })
+
   test("fails with AmbiguousParentSession when fallback attach sees multiple root sessions", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
@@ -209,6 +406,9 @@ describe("MissionControl background jobs", () => {
       jobs: {
         autoAttachToCurrentSession: true,
         allowLatestSessionFallback: true,
+      },
+      safety: {
+        requireExplicitParentOnAmbiguousAttach: false,
       },
     })
     const controller = new MissionControlJobController(directory, config)
@@ -427,6 +627,301 @@ describe("MissionControl background jobs", () => {
 
     const result = await controller.getResult(adapter, launchResult.data.jobID, false)
     expect(result.ok).toBe(true)
+  })
+
+  test("orphans unresolved idle jobs after restart instead of rebinding them live", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-restart-idle", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "restart-idle-message", role: "assistant", time: { created: 10 } },
+              parts: [{ id: "restart-idle-part", type: "text", text: "Reached idle before restart." }],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+        async prompt() {
+          throw new Error("relay failed")
+        },
+      },
+    })
+
+    const config = createMissionControlConfig({
+      jobs: {
+        autoRelayToParent: "on_idle",
+      },
+    })
+    const controller1 = new MissionControlJobController(directory, config)
+    await controller1.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller1)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Restart idle orphan",
+      prompt: "Leave this job idle with a failed relay.",
+      parentSessionID: "parent-session",
+      relayToParent: "on_idle",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller1.handleEvent(adapter, "session.idle", { sessionID: "child-restart-idle" })
+
+    const controller2 = new MissionControlJobController(directory, config)
+    await controller2.start()
+    const status = controller2.status(launchResult.data.jobID)
+    expect(status.ok).toBe(true)
+    if (!status.ok) {
+      throw new Error("Expected restarted idle job status to exist")
+    }
+
+    expect(status.data.job.state).toBe("orphaned")
+    expect(status.data.result?.summary).toContain("Reached idle before restart")
+    expect(controller2.getActiveJobCount()).toBe(0)
+
+    const result = await controller2.getResult(adapter, launchResult.data.jobID, false)
+    expect(result.ok).toBe(true)
+  })
+
+  test("can transition from idle back to running when relay is still pending", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-resume-after-idle", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "resume-message", role: "assistant", time: { created: 10 } },
+              parts: [{ id: "resume-part", type: "text", text: "Reached an idle checkpoint." }],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+        async prompt() {
+          throw new Error("relay failed")
+        },
+      },
+    })
+
+    const config = createMissionControlConfig({
+      jobs: {
+        autoRelayToParent: "on_idle",
+      },
+    })
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Resume after idle",
+      prompt: "Pause, then continue if more work appears.",
+      parentSessionID: "parent-session",
+      relayToParent: "on_idle",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "session.idle", {
+      sessionID: "child-resume-after-idle",
+      time: { updated: 10 },
+    })
+    expect(controller.getActiveJobCount()).toBe(1)
+
+    const idleStatus = controller.status(launchResult.data.jobID)
+    expect(idleStatus.ok).toBe(true)
+    if (!idleStatus.ok) {
+      throw new Error("Expected idle job status to exist")
+    }
+
+    expect(idleStatus.data.job.state).toBe("idle")
+    expect(idleStatus.data.job.relayState).toBe("failed")
+
+    await controller.handleEvent(adapter, "message.updated", {
+      sessionID: "child-resume-after-idle",
+      time: { updated: 11 },
+    })
+
+    const resumedStatus = controller.status(launchResult.data.jobID)
+    expect(resumedStatus.ok).toBe(true)
+    if (!resumedStatus.ok) {
+      throw new Error("Expected resumed job status to exist")
+    }
+
+    expect(resumedStatus.data.job.state).toBe("running")
+    expect(resumedStatus.data.result).toBeUndefined()
+    expect(controller.getActiveJobCount()).toBe(1)
+
+    const resumedResult = await controller.getResult(adapter, launchResult.data.jobID, false)
+    expect(resumedResult.ok).toBe(false)
+  })
+
+  test("does not reopen an idle job on a stale status event without a fresher timestamp", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-stale-status", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "stale-status-message", role: "assistant", time: { created: 10 } },
+              parts: [{ id: "stale-status-part", type: "text", text: "Reached idle." }],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+        async prompt() {
+          throw new Error("relay failed")
+        },
+      },
+    })
+
+    const config = createMissionControlConfig({
+      jobs: {
+        autoRelayToParent: "on_idle",
+      },
+    })
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Ignore stale status",
+      prompt: "Do not reopen from stale status.",
+      parentSessionID: "parent-session",
+      relayToParent: "on_idle",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "session.idle", {
+      sessionID: "child-stale-status",
+      time: { updated: 10 },
+    })
+    await controller.handleEvent(adapter, "session.status", {
+      sessionID: "child-stale-status",
+      status: { type: "running" },
+      time: { updated: 9 },
+    })
+
+    const status = controller.status(launchResult.data.jobID)
+    expect(status.ok).toBe(true)
+    if (!status.ok) {
+      throw new Error("Expected stale-status job status to exist")
+    }
+
+    expect(status.data.job.state).toBe("idle")
+  })
+
+  test("reopens an idle job when session.status reports fresher running activity", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-fresh-status", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "fresh-status-message", role: "assistant", time: { created: 10 } },
+              parts: [{ id: "fresh-status-part", type: "text", text: "Reached idle." }],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+        async prompt() {
+          throw new Error("relay failed")
+        },
+      },
+    })
+
+    const config = createMissionControlConfig({
+      jobs: {
+        autoRelayToParent: "on_idle",
+      },
+    })
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Fresh status resume",
+      prompt: "Allow a fresh status event to reopen idle work.",
+      parentSessionID: "parent-session",
+      relayToParent: "on_idle",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "session.idle", {
+      sessionID: "child-fresh-status",
+      time: { updated: 10 },
+    })
+    await controller.handleEvent(adapter, "session.status", {
+      sessionID: "child-fresh-status",
+      status: { type: "running" },
+      time: { updated: 11 },
+    })
+
+    const status = controller.status(launchResult.data.jobID)
+    expect(status.ok).toBe(true)
+    if (!status.ok) {
+      throw new Error("Expected fresh-status job status to exist")
+    }
+
+    expect(status.data.job.state).toBe("running")
+    expect(status.data.result).toBeUndefined()
   })
 
   test("auto-relays failed jobs when relay mode is on_completion", async () => {
@@ -649,6 +1144,156 @@ describe("MissionControl background jobs", () => {
     }
 
     expect(result.data.summary).toContain("Transcript capture failed")
+  })
+
+  test("parses structured final reports and relays the recommended next step", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    let relayedText = ""
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-structured-relay", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: {
+                id: "structured-message",
+                role: "assistant",
+                time: { created: 10 },
+              },
+              parts: [
+                {
+                  id: "structured-part",
+                  type: "text",
+                  text: `Status: completed
+Summary: Verified the implementation gap is closed.
+Key Findings: The contract now aligns.
+Blockers:
+- None
+Recommended Next Step: Run the full verification suite before merging.`,
+                },
+              ],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+        async prompt({ body }: { body: { parts?: Array<{ text?: string }> } }) {
+          relayedText = body.parts?.[0]?.text ?? ""
+          return undefined
+        },
+      },
+    })
+
+    const config = createMissionControlConfig({
+      jobs: {
+        autoRelayToParent: "on_completion",
+      },
+    })
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Structured relay",
+      prompt: "Finish with the required report headings.",
+      parentSessionID: "parent-session",
+      relayToParent: "on_completion",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "session.idle", { sessionID: "child-structured-relay" })
+
+    const result = await controller.getResult(adapter, launchResult.data.jobID, false)
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected structured result to exist")
+    }
+
+    expect(result.data.summary).toContain("Verified the implementation gap is closed.")
+    expect(result.data.summary).toContain("Key Findings:\nThe contract now aligns.")
+    expect(result.data.blockers).toEqual([])
+    expect(result.data.recommendedNextStep).toBe("Run the full verification suite before merging.")
+    expect(relayedText).toContain("Recommended Next Step")
+    expect(relayedText).toContain("Run the full verification suite before merging.")
+    expect(relayedText).not.toContain("Review the child session transcript if deeper inspection is needed.")
+  })
+
+  test("persists normalized job lifecycle events alongside jobs and results", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-event-log", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "event-message", role: "assistant", time: { created: 10 } },
+              parts: [{ id: "event-part", type: "text", text: "Finished event-log test." }],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig({
+      jobs: {
+        autoRelayToParent: "never",
+      },
+    })
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Persist events",
+      prompt: "Exercise the lifecycle log.",
+      parentSessionID: "parent-session",
+      relayToParent: "never",
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "session.idle", { sessionID: "child-event-log" })
+
+    const persisted = JSON.parse(await readFile(getJobsStorePath(directory), "utf8")) as {
+      events?: Array<{
+        jobID: string
+        type: string
+        state: string
+      }>
+    }
+
+    const jobEvents = persisted.events?.filter((event) => event.jobID === launchResult.data.jobID) ?? []
+    expect(jobEvents.map((event) => event.type)).toEqual(
+      expect.arrayContaining(["job.created", "job.launching", "job.child_bound", "job.launched", "session.idle", "job.completed"]),
+    )
+    expect(jobEvents.at(-1)?.state).toBe("completed")
   })
 
   test("returns ParentSessionNotFound when an explicit parentSessionID cannot be resolved", async () => {

@@ -184,6 +184,67 @@ describe("MissionControlSearchService", () => {
     expect(result.data.matches[0]?.sessionID).toBe("child-session")
   })
 
+  test("supports alternate session parent and timestamp shapes during indexing", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          return [
+            {
+              id: "root-session",
+              directory,
+              title: "Root Mission",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              updatedAt: "2026-01-01T00:00:01.000Z",
+            },
+            {
+              id: "child-session",
+              directory,
+              title: "Child Mission",
+              parentSessionID: "root-session",
+              createdAt: "2026-01-01T00:00:02.000Z",
+              updatedAt: "2026-01-01T00:00:03.000Z",
+            },
+          ]
+        },
+        async messages({ path }: { path: { id: string } }) {
+          if (path.id === "root-session") {
+            return [
+              {
+                info: { id: "message-root", role: "assistant", time: { created: 5 } },
+                parts: [{ id: "part-root", type: "text", text: "root content" }],
+              },
+            ]
+          }
+
+          return [
+            {
+              info: { id: "message-child", role: "assistant", time: { created: 6 } },
+              parts: [{ id: "part-child", type: "text", text: "alternate-shape token" }],
+            },
+          ]
+        },
+      },
+    })
+
+    const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
+      query: "alternate-shape token",
+      sessionID: "root-session",
+      limit: 5,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected alternate-shape search to succeed")
+    }
+
+    expect(result.data.matches).toHaveLength(1)
+    expect(result.data.matches[0]?.sessionID).toBe("child-session")
+  })
+
   test("uses a true global discovery scope when the global flag is enabled", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     const otherDirectory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
@@ -562,6 +623,173 @@ describe("MissionControlSearchService", () => {
     expect(result.data.requestedMode).toBe("lexical")
     expect(result.data.effectiveMode).toBe("lexical")
     expect(result.data.matches).toHaveLength(1)
+    expect(result.data.matches[0]?.matchType).toBe("exact")
+  })
+
+  test("warns when exact mode only finds ranked lexical candidates", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          return [
+            {
+              id: "candidate-session",
+              directory,
+              title: "Candidate Session",
+              time: { created: 1, updated: 10 },
+            },
+          ]
+        },
+        async messages() {
+          return [
+            {
+              info: {
+                id: "message-candidate",
+                role: "assistant",
+                time: { created: 5 },
+              },
+              parts: [
+                {
+                  id: "part-candidate",
+                  type: "text",
+                  text: "HTX exact token recorded here",
+                },
+              ],
+            },
+          ]
+        },
+      },
+    })
+
+    const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
+      query: "HTX missing",
+      exact: true,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected exact lexical candidate search to succeed")
+    }
+
+    expect(result.data.matches).toHaveLength(1)
+    expect(result.data.matches[0]?.matchType).toBe("candidate")
+    expect(result.data.warnings).toContain("No exact lexical hits were found; returning ranked lexical candidates instead.")
+  })
+
+  test("does not mark path or hyphenated prefixes as exact hits", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          return [
+            {
+              id: "prefix-session",
+              directory,
+              title: "Prefix Session",
+              time: { created: 1, updated: 10 },
+            },
+          ]
+        },
+        async messages() {
+          return [
+            {
+              info: {
+                id: "message-prefix",
+                role: "assistant",
+                time: { created: 5 },
+              },
+              parts: [
+                {
+                  id: "part-prefix",
+                  type: "text",
+                  text: "mission-control-job and foo/bar/baz are only longer prefixes.",
+                },
+              ],
+            },
+          ]
+        },
+      },
+    })
+
+    const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
+      query: "mission-control",
+      exact: true,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected hyphen-prefix exact search to succeed")
+    }
+
+    expect(result.data.matches).toHaveLength(1)
+    expect(result.data.matches[0]?.matchType).toBe("candidate")
+    expect(result.data.warnings).toContain("No exact lexical hits were found; returning ranked lexical candidates instead.")
+  })
+
+  test("ranks exact lexical hits ahead of candidates before applying the result limit", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          return [
+            {
+              id: "candidate-session",
+              directory,
+              title: "Candidate Session",
+              time: { created: 1, updated: 10 },
+            },
+            {
+              id: "exact-text-session",
+              directory,
+              title: "mission-control",
+              time: { created: 2, updated: 11 },
+            },
+          ]
+        },
+        async messages({ path }: { path: { id: string } }) {
+          if (path.id === "candidate-session") {
+            return [
+              {
+                info: { id: "candidate-message", role: "assistant", time: { created: 5 } },
+                parts: [{ id: "candidate-part", type: "text", text: "mission-control-job is only a longer prefix." }],
+              },
+            ]
+          }
+
+          return [
+            {
+              info: { id: "exact-message", role: "assistant", time: { created: 6 } },
+              parts: [{ id: "exact-part", type: "text", text: "mission-control exact hit" }],
+            },
+          ]
+        },
+      },
+    })
+
+    const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
+      query: "mission-control",
+      exact: true,
+      limit: 1,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected exact-first lexical search to succeed")
+    }
+
+    expect(result.data.matches).toHaveLength(1)
+    expect(result.data.matches[0]?.sessionID).toBe("exact-text-session")
+    expect(result.data.matches[0]?.matchType).toBe("exact")
+    expect(result.data.warnings).toEqual([])
   })
 
   test("auto-selects lexical retrieval for bare acronym queries", async () => {
@@ -621,6 +849,7 @@ describe("MissionControlSearchService", () => {
     expect(result.data.requestedMode).toBe("lexical")
     expect(result.data.effectiveMode).toBe("lexical")
     expect(result.data.matches).toHaveLength(1)
+    expect(result.data.matches[0]?.matchType).toBe("exact")
   })
 
   test("treats quoted queries as exact lexical phrases without requiring literal quotes in content", async () => {

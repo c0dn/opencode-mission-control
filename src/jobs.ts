@@ -5,9 +5,10 @@ import { dirname, join } from "node:path"
 
 import type { OpenCodeAdapter } from "./opencode-client.js"
 import { deliverParentRelay } from "./relay.js"
-import { extractSessionID } from "./session-extractors.js"
+import { extractSessionID, extractSessionTimestamp, extractStatus } from "./session-extractors.js"
 import type {
   BackgroundJob,
+  JobLifecycleEvent,
   JobListArgs,
   JobResultSnapshot,
   JobStartArgs,
@@ -23,6 +24,7 @@ interface JobStoreSnapshot {
   version: number
   jobs: BackgroundJob[]
   results: JobResultSnapshot[]
+  events?: JobLifecycleEvent[]
 }
 
 export class MissionControlJobController {
@@ -32,7 +34,10 @@ export class MissionControlJobController {
   private config: MissionControlConfig
   private readonly jobs = new Map<string, BackgroundJob>()
   private readonly results = new Map<string, JobResultSnapshot>()
+  private readonly events = new Map<string, JobLifecycleEvent[]>()
   private readonly childSessionToJobID = new Map<string, string>()
+  private launchReservations = 0
+  private persistChain = Promise.resolve()
 
   constructor(rootDir: string, config: MissionControlConfig) {
     this.rootDir = rootDir
@@ -45,20 +50,32 @@ export class MissionControlJobController {
       return
     }
 
+    for (const event of snapshot.events ?? []) {
+      const existing = this.events.get(event.jobID) ?? []
+      existing.push(event)
+      this.events.set(event.jobID, existing)
+    }
+
     let mutated = false
 
-    for (const job of snapshot.jobs) {
-      if (isRecoverableJobState(job.state)) {
+    for (const persistedJob of snapshot.jobs) {
+      const job = normalizeLoadedJob(persistedJob, this.config)
+      if (isRecoverableJobState(job.state) || (job.state === "idle" && job.relayState !== "delivered")) {
+        const previousState = job.state
         job.state = "orphaned"
         job.failureReason = "Mission Control restarted before the background job reached a terminal state."
         job.lastObservedEvent = "runtime.recovered"
         job.updatedAt = Date.now()
         job.completedAt ??= Date.now()
+        this.recordJobEvent(job, "runtime.recovered", {
+          previousState,
+          detail: job.failureReason,
+        })
         mutated = true
       }
 
       this.jobs.set(job.jobID, job)
-      if (job.childSessionID && !isClosedJobState(job.state)) {
+      if (job.childSessionID && isLiveTrackedJobState(job.state)) {
         this.childSessionToJobID.set(job.childSessionID, job.jobID)
       }
     }
@@ -83,6 +100,9 @@ export class MissionControlJobController {
       sessionID: string
       directory?: string
     },
+    options: {
+      consumeLaunchReservation?: boolean
+    } = {},
   ): Promise<BackgroundJob> {
     const relayMode = args.relayToParent ?? this.config.jobs.autoRelayToParent
     const job: BackgroundJob = {
@@ -100,7 +120,22 @@ export class MissionControlJobController {
     }
 
     this.jobs.set(job.jobID, job)
-    await this.persist()
+    if (options.consumeLaunchReservation) {
+      this.releaseLaunchSlot()
+    }
+    this.recordJobEvent(job, "job.created")
+    try {
+      await this.persist()
+    } catch (error) {
+      this.jobs.delete(job.jobID)
+      this.events.delete(job.jobID)
+      try {
+        await this.persist()
+      } catch {
+        // Best-effort corrective write after rollback.
+      }
+      throw error
+    }
     return job
   }
 
@@ -110,9 +145,11 @@ export class MissionControlJobController {
       return
     }
 
+    const previousState = job.state
     job.state = "launching"
     job.updatedAt = Date.now()
     job.lastObservedEvent = "job.launching"
+    this.recordJobEvent(job, "job.launching", { previousState })
     await this.persist()
   }
 
@@ -122,12 +159,14 @@ export class MissionControlJobController {
       return
     }
 
+    const previousState = job.state
     job.childSessionID = childSessionID
     job.childDirectory = childDirectory
     job.state = "launching"
     job.updatedAt = Date.now()
     job.lastObservedEvent = "job.child_bound"
     this.childSessionToJobID.set(childSessionID, jobID)
+    this.recordJobEvent(job, "job.child_bound", { previousState })
     await this.persist()
   }
 
@@ -137,6 +176,7 @@ export class MissionControlJobController {
       return
     }
 
+    const previousState = job.state
     job.childSessionID = childSessionID
     job.childDirectory = childDirectory
     job.state = "running"
@@ -144,6 +184,7 @@ export class MissionControlJobController {
     job.updatedAt = Date.now()
     job.lastObservedEvent = "job.launched"
     this.childSessionToJobID.set(childSessionID, jobID)
+    this.recordJobEvent(job, "job.launched", { previousState })
     await this.persist()
   }
 
@@ -153,11 +194,25 @@ export class MissionControlJobController {
       return
     }
 
+    const previousState = job.state
     job.state = "failed"
     job.failureReason = reason
     job.updatedAt = Date.now()
     job.completedAt = Date.now()
     job.lastObservedEvent = "job.launch_failed"
+    this.closeJobTracking(job)
+    this.results.set(jobID, {
+      jobID,
+      childSessionID: job.childSessionID ?? "unknown",
+      state: "failed",
+      headline: job.title,
+      summary: reason,
+      blockers: collectBlockers(job),
+      recommendedNextStep: undefined,
+      keyMessageIDs: [],
+      observedAt: Date.now(),
+    })
+    this.recordJobEvent(job, "job.launch_failed", { previousState, detail: reason })
     await this.persist()
   }
 
@@ -167,11 +222,14 @@ export class MissionControlJobController {
       return
     }
 
+    const previousState = job.state
     job.state = "orphaned"
     job.failureReason = reason
     job.updatedAt = Date.now()
     job.completedAt = Date.now()
     job.lastObservedEvent = "job.orphaned"
+    this.closeJobTracking(job)
+    this.recordJobEvent(job, "job.orphaned", { previousState, detail: reason })
     await this.persist()
   }
 
@@ -201,25 +259,51 @@ export class MissionControlJobController {
       return
     }
 
+    const previousState = job.state
+    const previousSourceUpdatedAt = job.lastSourceUpdatedAt
+    const eventUpdatedAt = extractSessionTimestamp(payload, "updated")
+    const hasFreshSourceTimestamp =
+      eventUpdatedAt === undefined || eventUpdatedAt >= (previousSourceUpdatedAt ?? Number.NEGATIVE_INFINITY)
+    const canLeaveIdle =
+      previousState !== "idle" ||
+      eventUpdatedAt === undefined ||
+      eventUpdatedAt > (previousSourceUpdatedAt ?? Number.NEGATIVE_INFINITY)
     job.lastObservedEvent = type
 
     switch (type) {
       case "permission.asked":
-        job.state = "waiting_permission"
+        if (canLeaveIdle) {
+          job.state = "waiting_permission"
+        }
+        this.clearStaleSnapshot(job, previousState)
+        this.recordJobEvent(job, type, { previousState })
         break
       case "permission.replied":
-        job.state = "running"
+        if (canLeaveIdle) {
+          job.state = "running"
+        }
+        this.clearStaleSnapshot(job, previousState)
+        this.recordJobEvent(job, type, { previousState })
         break
       case "question.asked":
-        job.state = "waiting_question"
+        if (canLeaveIdle) {
+          job.state = "waiting_question"
+        }
+        this.clearStaleSnapshot(job, previousState)
+        this.recordJobEvent(job, type, { previousState })
         break
       case "question.replied":
-        job.state = "running"
+        if (canLeaveIdle) {
+          job.state = "running"
+        }
+        this.clearStaleSnapshot(job, previousState)
+        this.recordJobEvent(job, type, { previousState })
         break
       case "question.rejected":
         job.state = "failed"
         job.failureReason = "Question rejected"
         job.completedAt = Date.now()
+        this.recordJobEvent(job, type, { previousState, detail: job.failureReason })
         await this.captureResult(adapter, job)
         this.closeJobTracking(job)
         if (job.relayMode === "on_completion") {
@@ -230,6 +314,7 @@ export class MissionControlJobController {
         job.state = "failed"
         job.failureReason = "Child session reported an error"
         job.completedAt = Date.now()
+        this.recordJobEvent(job, type, { previousState, detail: job.failureReason })
         await this.captureResult(adapter, job)
         this.closeJobTracking(job)
         if (job.relayMode === "on_completion") {
@@ -237,29 +322,56 @@ export class MissionControlJobController {
         }
         break
       case "session.idle":
-        job.state = "idle"
-        await this.captureResult(adapter, job)
-        this.closeJobTracking(job)
-        if (job.relayMode === "never" || job.relayMode === "manual_only") {
-          this.markCompleted(job)
-          this.updateSnapshotState(job.jobID, "completed")
-          break
-        }
-
-        if (job.relayMode === "on_idle" || job.relayMode === "on_completion") {
-          await this.relayResult(adapter, job.jobID)
+        if (hasFreshSourceTimestamp) {
+          await this.handleIdleTransition(adapter, job, previousState, type)
         }
         break
       case "session.status":
-        if (job.state !== "waiting_permission" && job.state !== "waiting_question") {
+        const sessionStatus = extractStatus(payload)
+
+        if (sessionStatus === "idle") {
+          if (hasFreshSourceTimestamp) {
+            await this.handleIdleTransition(adapter, job, previousState, type)
+          }
+          break
+        } else if (sessionStatus === "waiting_permission" && canLeaveIdle) {
+          job.state = "waiting_permission"
+        } else if (sessionStatus === "waiting_question" && canLeaveIdle) {
+          job.state = "waiting_question"
+        } else if (
+          job.state !== "waiting_permission" &&
+          job.state !== "waiting_question" &&
+          canLeaveIdle
+        ) {
           job.state = "running"
         }
+        this.clearStaleSnapshot(job, previousState)
+        this.recordJobEvent(job, type, {
+          previousState: previousState !== job.state ? previousState : undefined,
+        })
+        break
+      case "message.updated":
+      case "message.part.updated":
+        if (
+          previousState === "idle" &&
+          eventUpdatedAt !== undefined &&
+          eventUpdatedAt > (previousSourceUpdatedAt ?? Number.NEGATIVE_INFINITY)
+        ) {
+          job.state = "running"
+        }
+        this.clearStaleSnapshot(job, previousState)
+        this.recordJobEvent(job, type, {
+          previousState: previousState !== job.state ? previousState : undefined,
+        })
         break
       default:
         return
     }
 
     job.updatedAt = Date.now()
+    if (eventUpdatedAt !== undefined) {
+      job.lastSourceUpdatedAt = Math.max(job.lastSourceUpdatedAt ?? Number.NEGATIVE_INFINITY, eventUpdatedAt)
+    }
     await this.persist()
   }
 
@@ -278,9 +390,11 @@ export class MissionControlJobController {
       return fail("JobNotFound", `Job '${jobID}' was not found.`)
     }
 
+    const storedResult = this.results.get(jobID)
+
     return ok({
       job,
-      result: this.results.get(jobID),
+      result: canExposeStoredResult(job.state, Boolean(storedResult)) ? storedResult : undefined,
     })
   }
 
@@ -302,10 +416,12 @@ export class MissionControlJobController {
       await adapter.abortSession(job.childSessionID, job.childDirectory)
     }
 
+    const previousState = job.state
     job.state = "aborted"
     job.updatedAt = Date.now()
     job.completedAt = Date.now()
     job.lastObservedEvent = "job.cancelled"
+    this.recordJobEvent(job, "job.cancelled", { previousState })
     this.results.set(jobID, {
       jobID,
       childSessionID: job.childSessionID ?? "unknown",
@@ -313,6 +429,7 @@ export class MissionControlJobController {
       headline: job.title,
       summary: "The background job was aborted.",
       blockers: [],
+      recommendedNextStep: undefined,
       keyMessageIDs: [],
       observedAt: Date.now(),
     })
@@ -330,7 +447,7 @@ export class MissionControlJobController {
       return fail("JobNotFound", `Job '${jobID}' was not found.`)
     }
 
-    if (!isStableResultState(job.state) && !this.results.has(jobID)) {
+    if (!canExposeStoredResult(job.state, this.results.has(jobID))) {
       return fail(
         "JobLaunchFailed",
         `Job '${jobID}' does not have a stable result snapshot yet.`,
@@ -408,6 +525,7 @@ export class MissionControlJobController {
 
     try {
       await deliverParentRelay(adapter, job, result)
+      const previousState = job.state
       job.relayState = "delivered"
       if (job.state === "idle") {
         this.markCompleted(job)
@@ -416,15 +534,27 @@ export class MissionControlJobController {
       this.closeJobTracking(job)
       job.updatedAt = Date.now()
       job.lastObservedEvent = options.force ? "job.relay_forced" : "job.relay_delivered"
+      this.recordJobEvent(job, job.lastObservedEvent, {
+        previousState: previousState !== job.state ? previousState : undefined,
+      })
       await this.persist()
       return ok({
         job,
         result,
       })
     } catch {
+      if (job.relayState === "delivered") {
+        return fail(
+          "JobLaunchFailed",
+          `Mission Control delivered the result for job '${jobID}' to the parent session, but could not persist that delivery state.`,
+          "Treat this relay as already delivered unless you have verified that the parent session never received it.",
+        )
+      }
+
       job.relayState = "failed"
       job.updatedAt = Date.now()
       job.lastObservedEvent = "job.relay_failed"
+      this.recordJobEvent(job, "job.relay_failed")
       await this.persist()
       return fail(
         "JobLaunchFailed",
@@ -435,9 +565,26 @@ export class MissionControlJobController {
   }
 
   getActiveJobCount() {
-    return Array.from(this.jobs.values()).filter((job) =>
-      ["queued", "launching", "running", "waiting_permission", "waiting_question"].includes(job.state),
-    ).length
+    return this.launchReservations +
+      Array.from(this.jobs.values()).filter((job) =>
+      ["queued", "launching", "running", "waiting_permission", "waiting_question"].includes(job.state) ||
+        (job.state === "idle" &&
+          Boolean(job.childSessionID) &&
+          this.childSessionToJobID.get(job.childSessionID ?? "") === job.jobID),
+      ).length
+  }
+
+  tryReserveLaunchSlot(maxConcurrent: number) {
+    if (this.getActiveJobCount() >= maxConcurrent) {
+      return false
+    }
+
+    this.launchReservations += 1
+    return true
+  }
+
+  releaseLaunchSlot() {
+    this.launchReservations = Math.max(0, this.launchReservations - 1)
   }
 
   private async captureResult(adapter: OpenCodeAdapter, job: BackgroundJob) {
@@ -454,14 +601,17 @@ export class MissionControlJobController {
         .find((message: any) => Array.isArray(message?.parts) && message.parts.length > 0)
 
       const keyMessageID = typeof lastMessage?.info?.id === "string" ? lastMessage.info.id : undefined
-      const summary = summarizeMessageParts(lastMessage?.parts ?? []) || defaultSummaryForState(job)
+      const rawReport = collectMessagePartsText(lastMessage?.parts ?? [])
+      const structuredReport = parseStructuredFinalReport(rawReport)
       snapshot = {
         jobID: job.jobID,
         childSessionID: job.childSessionID,
         state: mapJobStateToSnapshotState(job.state),
         headline: job.title,
-        summary,
-        blockers: collectBlockers(job),
+        summary:
+          truncateSummary(buildStructuredSummary(structuredReport) || rawReport) || defaultSummaryForState(job),
+        blockers: mergeBlockers(job, structuredReport.blockers),
+        recommendedNextStep: structuredReport.recommendedNextStep,
         keyMessageIDs: keyMessageID ? [keyMessageID] : [],
         observedAt: Date.now(),
       }
@@ -473,6 +623,7 @@ export class MissionControlJobController {
         headline: job.title,
         summary: `${defaultSummaryForState(job)} Transcript capture failed while finalizing the job.`,
         blockers: collectBlockers(job),
+        recommendedNextStep: undefined,
         keyMessageIDs: [],
         observedAt: Date.now(),
       }
@@ -502,15 +653,21 @@ export class MissionControlJobController {
   }
 
   private async persist() {
-    const snapshot: JobStoreSnapshot = {
-      version: MissionControlJobController.VERSION,
-      jobs: Array.from(this.jobs.values()),
-      results: Array.from(this.results.values()),
+    const writeSnapshot = async () => {
+      const snapshot: JobStoreSnapshot = {
+        version: MissionControlJobController.VERSION,
+        jobs: Array.from(this.jobs.values()),
+        results: Array.from(this.results.values()),
+        events: Array.from(this.events.values()).flat(),
+      }
+
+      const storePath = this.getStorePath()
+      await mkdir(dirname(storePath), { recursive: true })
+      await writeFile(storePath, JSON.stringify(snapshot, null, 2), "utf8")
     }
 
-    const storePath = this.getStorePath()
-    await mkdir(dirname(storePath), { recursive: true })
-    await writeFile(storePath, JSON.stringify(snapshot, null, 2), "utf8")
+    this.persistChain = this.persistChain.then(writeSnapshot, writeSnapshot)
+    await this.persistChain
   }
 
   private closeJobTracking(job: BackgroundJob) {
@@ -533,9 +690,66 @@ export class MissionControlJobController {
     snapshot.state = state
     snapshot.observedAt = Date.now()
   }
+
+  private async handleIdleTransition(
+    adapter: OpenCodeAdapter,
+    job: BackgroundJob,
+    previousState: BackgroundJob["state"],
+    eventType: string,
+  ) {
+    job.state = "idle"
+    this.recordJobEvent(job, eventType, { previousState })
+
+    if (job.relayMode === "never" || job.relayMode === "manual_only") {
+      const previousIdleState = job.state
+      this.markCompleted(job)
+      await this.captureResult(adapter, job)
+      this.recordJobEvent(job, "job.completed", { previousState: previousIdleState })
+      this.closeJobTracking(job)
+      return
+    }
+
+    await this.captureResult(adapter, job)
+
+    if (job.relayMode === "on_idle" || job.relayMode === "on_completion") {
+      await this.relayResult(adapter, job.jobID)
+    }
+  }
+
+  private clearStaleSnapshot(job: BackgroundJob, previousState: BackgroundJob["state"]) {
+    if (isStableResultState(previousState) && !isStableResultState(job.state)) {
+      this.results.delete(job.jobID)
+    }
+  }
+
+  private recordJobEvent(
+    job: BackgroundJob,
+    type: string,
+    options: {
+      previousState?: BackgroundJob["state"]
+      detail?: string
+    } = {},
+  ) {
+    const event: JobLifecycleEvent = {
+      eventID: createJobEventID(job.jobID),
+      jobID: job.jobID,
+      parentSessionID: job.parentSessionID,
+      childSessionID: job.childSessionID,
+      type,
+      state: job.state,
+      previousState: options.previousState,
+      at: Date.now(),
+      detail: options.detail,
+    }
+
+    const events = this.events.get(job.jobID) ?? []
+    events.push(event)
+    this.events.set(job.jobID, events)
+  }
 }
 
 const createJobID = () => `job-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+const createJobEventID = (jobID: string) => `${jobID}-evt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 
 const getMissionControlCacheRoot = (rootDir: string) => {
   const xdgCache = process.env.XDG_CACHE_HOME?.trim()
@@ -559,7 +773,7 @@ const mapJobStateToSnapshotState = (state: BackgroundJob["state"]): JobResultSna
   }
 }
 
-const summarizeMessageParts = (parts: any[]) => {
+const collectMessagePartsText = (parts: any[]) => {
   const text = parts
     .map((part) => {
       if (typeof part?.text === "string") {
@@ -581,6 +795,14 @@ const summarizeMessageParts = (parts: any[]) => {
     .filter(Boolean)
     .join("\n")
     .trim()
+
+  return text.length > 0 ? text : ""
+}
+
+const truncateSummary = (text: string | undefined) => {
+  if (!text) {
+    return ""
+  }
 
   return text.length > 0 ? text.slice(0, 1200) : ""
 }
@@ -620,11 +842,128 @@ const collectBlockers = (job: BackgroundJob) => {
   return blockers
 }
 
+const mergeBlockers = (job: BackgroundJob, reportedBlockers: string[]) => {
+  return Array.from(new Set([...collectBlockers(job), ...reportedBlockers]))
+}
+
+const normalizeLoadedJob = (job: BackgroundJob, config: MissionControlConfig): BackgroundJob => {
+  const relayMode = job.relayMode ?? config.jobs.autoRelayToParent
+  return {
+    ...job,
+    relayMode,
+    relayState: job.relayState ?? (relayMode === "never" ? "not_requested" : "pending"),
+    lastSourceUpdatedAt: job.lastSourceUpdatedAt,
+  }
+}
+
+const parseStructuredFinalReport = (text: string) => {
+  const sections: Record<string, string[]> = {}
+  let currentSection: string | undefined
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    const matchedHeading = matchStructuredHeading(line)
+    if (matchedHeading) {
+      currentSection = matchedHeading.section
+      sections[currentSection] ??= []
+      if (matchedHeading.remainder) {
+        sections[currentSection].push(matchedHeading.remainder)
+      }
+      continue
+    }
+
+    if (!currentSection || !line) {
+      continue
+    }
+
+    sections[currentSection] ??= []
+    sections[currentSection].push(line)
+  }
+
+  return {
+    summary: joinStructuredSection(sections.summary),
+    keyFindings: joinStructuredSection(sections.keyFindings),
+    blockers: normalizeStructuredBlockers(joinStructuredSection(sections.blockers)),
+    recommendedNextStep: joinStructuredSection(sections.recommendedNextStep),
+  }
+}
+
+const buildStructuredSummary = (report: {
+  summary?: string
+  keyFindings?: string
+}) => {
+  const segments = [report.summary]
+
+  if (report.keyFindings) {
+    segments.push(`Key Findings:\n${report.keyFindings}`)
+  }
+
+  const summary = segments.filter(Boolean).join("\n\n").trim()
+  return summary ? summary : undefined
+}
+
+const matchStructuredHeading = (line: string) => {
+  const match = /^(?:[-*#]+\s*)?(Status|Summary|Key Findings|Blockers|Recommended Next Step)\s*:?[ \t]*(.*)$/i.exec(
+    line,
+  )
+  if (!match) {
+    return undefined
+  }
+
+  const heading = match[1]?.toLowerCase()
+  const remainder = match[2]?.trim()
+  const section =
+    heading === "recommended next step"
+      ? "recommendedNextStep"
+      : heading === "key findings"
+        ? "keyFindings"
+        : heading
+
+  return {
+    section,
+    remainder,
+  }
+}
+
+const joinStructuredSection = (lines: string[] | undefined) => {
+  const value = lines?.join("\n").trim()
+  return value ? value : undefined
+}
+
+const normalizeStructuredBlockers = (blockers: string | undefined) => {
+  if (!blockers) {
+    return []
+  }
+
+  if (/^none\.?$/i.test(blockers)) {
+    return []
+  }
+
+  const entries = blockers
+    .split(/\n|;|•|^- /gm)
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => entry.replace(/^[-*]\s*/, ""))
+    .filter(Boolean)
+
+  if (entries.every((entry) => /^none\.?$/i.test(entry))) {
+    return []
+  }
+
+  return entries
+}
+
 const isStableResultState = (state: BackgroundJob["state"]) =>
   ["idle", "completed", "failed", "aborted"].includes(state)
 
+const canExposeStoredResult = (state: BackgroundJob["state"], hasStoredResult: boolean) =>
+  isStableResultState(state) || (state === "orphaned" && hasStoredResult)
+
 const isClosedJobState = (state: BackgroundJob["state"]) =>
-  ["idle", "completed", "failed", "aborted", "orphaned"].includes(state)
+  ["completed", "failed", "aborted", "orphaned"].includes(state)
 
 const isRecoverableJobState = (state: BackgroundJob["state"]) =>
+  ["queued", "launching", "running", "waiting_permission", "waiting_question"].includes(state)
+
+const isLiveTrackedJobState = (state: BackgroundJob["state"]) =>
   ["queued", "launching", "running", "waiting_permission", "waiting_question"].includes(state)

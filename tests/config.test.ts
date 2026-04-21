@@ -30,6 +30,16 @@ describe("createMissionControlConfig", () => {
     expect(config.safety.autoApprovePermissions).toBe(false)
     expect(config.safety.autoAnswerQuestions).toBe(false)
   })
+
+  test("forces ambiguous auto-attach safety on even when overrides try to disable it", () => {
+    const config = createMissionControlConfig({
+      safety: {
+        requireExplicitParentOnAmbiguousAttach: false,
+      },
+    })
+
+    expect(config.safety.requireExplicitParentOnAmbiguousAttach).toBe(true)
+  })
 })
 
 describe("clampResultLimit", () => {

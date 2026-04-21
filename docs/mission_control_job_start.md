@@ -49,5 +49,6 @@ mission_control_job_start(
 - A blank `parentSessionID` is rejected.
 - `attach="auto"` still depends on the caller session context exposed by the tool runtime.
 - If the current session cannot be resolved and latest-session fallback is disabled, job launch fails instead of guessing.
+- If more than one plausible fallback root session exists in scope, job launch fails with `AmbiguousParentSession` instead of picking one automatically.
 - Jobs are attached child sessions, not detached daemons.
 - Job launch can fail if the concurrency limit is reached.

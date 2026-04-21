@@ -1,5 +1,5 @@
 import type { OpenCodeAdapter } from "./opencode-client.js"
-import { extractParentSessionID } from "./session-extractors.js"
+import { extractDirectory, extractParentSessionID, extractSessionID, extractSessionTimestamp } from "./session-extractors.js"
 import { MissionControlJobController } from "./jobs.js"
 import { buildAttachedJobPrompt } from "./prompts.js"
 import type {
@@ -32,7 +32,7 @@ export class MissionControlJobLauncher {
       )
     }
 
-    if (this.controller.getActiveJobCount() >= config.jobs.maxConcurrent) {
+    if (!this.controller.tryReserveLaunchSlot(config.jobs.maxConcurrent)) {
       return fail(
         "JobLaunchFailed",
         "The job concurrency limit has been reached.",
@@ -40,17 +40,27 @@ export class MissionControlJobLauncher {
       )
     }
 
-    const parentResolution = await this.resolveParentSession(adapter, args, caller, config)
-    if (!parentResolution.ok) {
-      return parentResolution
-    }
-
-    const job = await this.controller.createJob(args, {
-      sessionID: parentResolution.data.sessionID,
-      directory: parentResolution.data.directory,
-    })
+    let job: Awaited<ReturnType<MissionControlJobController["createJob"]>> | undefined
+    let reservationTransferred = false
 
     try {
+      const parentResolution = await this.resolveParentSession(adapter, args, caller, config)
+      if (!parentResolution.ok) {
+        return parentResolution
+      }
+
+      reservationTransferred = true
+      job = await this.controller.createJob(
+        args,
+        {
+          sessionID: parentResolution.data.sessionID,
+          directory: parentResolution.data.directory,
+        },
+        {
+          consumeLaunchReservation: true,
+        },
+      )
+
       await this.controller.markLaunching(job.jobID)
       const childSession = await adapter.createChildSession(
         parentResolution.data.sessionID,
@@ -78,7 +88,7 @@ export class MissionControlJobLauncher {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown launch failure"
 
-      if (this.controller.status(job.jobID).ok) {
+      if (job && this.controller.status(job.jobID).ok) {
         const currentStatus = this.controller.status(job.jobID)
         if (currentStatus.ok && currentStatus.data.job.childSessionID) {
           try {
@@ -97,9 +107,13 @@ export class MissionControlJobLauncher {
 
       return fail(
         "JobLaunchFailed",
-        `Failed to launch background job '${job.jobID}'.`,
+        `Failed to launch background job '${job?.jobID ?? "pending"}'.`,
         message,
       )
+    } finally {
+      if (!job && !reservationTransferred) {
+        this.controller.releaseLaunchSlot()
+      }
     }
   }
 
@@ -154,20 +168,20 @@ export class MissionControlJobLauncher {
           directory: resolved.directory ?? caller.directory,
           confidence: "high",
         })
-      } catch {
-        if (!config.jobs.allowLatestSessionFallback) {
-          return fail(
-            "CurrentSessionUnavailable",
-            "The current session could not be resolved for automatic attachment.",
-            "Pass parentSessionID explicitly or enable latest-session fallback.",
-          )
+        } catch {
+          if (!config.jobs.allowLatestSessionFallback) {
+            return fail(
+              "ParentSessionScopeUnavailable",
+              "The current session could not be resolved for automatic attachment.",
+              "Pass parentSessionID explicitly or enable latest-session fallback.",
+            )
         }
       }
     }
 
     if (!config.jobs.allowLatestSessionFallback) {
       return fail(
-        "CurrentSessionUnavailable",
+        "ParentSessionScopeUnavailable",
         "Automatic attachment could not resolve a current parent session.",
         "Pass parentSessionID explicitly or enable latest-session fallback.",
       )
@@ -185,7 +199,7 @@ export class MissionControlJobLauncher {
     }
 
     const rootSessions = sessions
-      .filter((session) => typeof session?.id === "string" && !extractParentSessionID(session))
+      .filter((session) => extractSessionID(session) && !extractParentSessionID(session))
       .sort((left, right) => toUpdatedAt(right) - toUpdatedAt(left))
 
     if (rootSessions.length === 0) {
@@ -205,16 +219,24 @@ export class MissionControlJobLauncher {
     }
 
     const chosen = rootSessions[0]
+    const chosenSessionID = extractSessionID(chosen)
+    if (!chosenSessionID) {
+      return fail(
+        "ParentSessionScopeUnavailable",
+        "Mission Control could not read a fallback parent session ID from the current scope.",
+        "Pass parentSessionID explicitly and retry.",
+      )
+    }
+
     return ok({
       mode: "scope_latest_session",
-      sessionID: chosen.id,
-      directory: typeof chosen?.directory === "string" ? chosen.directory : caller.directory,
+      sessionID: chosenSessionID,
+      directory: extractDirectory(chosen) ?? caller.directory,
       confidence: "best_effort",
     })
   }
 }
 
 const toUpdatedAt = (session: any) => {
-  const updatedAt = session?.time?.updated
-  return typeof updatedAt === "number" ? updatedAt : 0
+  return extractSessionTimestamp(session, "updated") ?? extractSessionTimestamp(session, "created") ?? 0
 }

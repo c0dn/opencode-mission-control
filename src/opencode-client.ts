@@ -1,3 +1,5 @@
+import { extractDirectory, extractSessionID } from "./session-extractors.js"
+
 type MaybeData<T> = T | { data: T }
 
 type UnknownRecord = Record<string, unknown>
@@ -106,12 +108,12 @@ export class OpenCodeAdapter {
     }
 
     const sessions = await this.listSessions({ global: true })
-    const matched = sessions.find((session: any) => session?.id === sessionID)
+    const matched = sessions.find((session: any) => extractSessionID(session) === sessionID)
     if (!matched) {
       throw scopedError instanceof Error ? scopedError : new Error(`Session '${sessionID}' was not found`)
     }
 
-    const directory = typeof matched?.directory === "string" ? matched.directory : ""
+    const directory = extractDirectory(matched) ?? ""
     const session = await this.getSession(sessionID, directory)
 
     return {

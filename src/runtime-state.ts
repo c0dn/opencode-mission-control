@@ -1,5 +1,13 @@
-import type { MissionControlEventRecord } from "./types.js"
-import { extractSessionID, extractStatus } from "./session-extractors.js"
+import {
+  extractDirectory,
+  extractParentSessionID,
+  extractSessionID,
+  extractSessionTimestamp,
+  extractStatus,
+  extractTitle,
+  hasParentSessionReference,
+} from "./session-extractors.js"
+import type { MissionControlEventRecord, RuntimeSessionMetadata } from "./types.js"
 
 export class MissionControlRuntimeState {
   private bufferSize: number
@@ -7,6 +15,8 @@ export class MissionControlRuntimeState {
   private readonly recentEvents: MissionControlEventRecord[] = []
   private readonly sessionStatuses = new Map<string, string>()
   private readonly dirtySessions = new Map<string, number>()
+  private readonly sessionMetadata = new Map<string, RuntimeSessionMetadata>()
+  private readonly childSessionIDsByParent = new Map<string, Set<string>>()
 
   constructor(bufferSize: number) {
     this.bufferSize = this.normalizeBufferSize(bufferSize)
@@ -22,6 +32,10 @@ export class MissionControlRuntimeState {
     this.recentEvents.push(record)
     this.eventCounts.set(type, (this.eventCounts.get(type) ?? 0) + 1)
     this.trimBuffer()
+
+    if (record.sessionID && shouldRefreshSessionMetadata(type)) {
+      this.refreshSessionMetadata(record.sessionID, payload)
+    }
 
     if (record.sessionID && shouldMarkSessionDirty(type)) {
       this.dirtySessions.set(record.sessionID, Math.max((this.dirtySessions.get(record.sessionID) ?? 0) + 1, record.at))
@@ -83,6 +97,14 @@ export class MissionControlRuntimeState {
 
   statusForSession(sessionID: string, fallback?: string) {
     return this.sessionStatuses.get(sessionID) ?? fallback
+  }
+
+  metadataForSession(sessionID: string) {
+    return this.sessionMetadata.get(sessionID)
+  }
+
+  childSessionIDs(parentSessionID: string) {
+    return Array.from(this.childSessionIDsByParent.get(parentSessionID) ?? [])
   }
 
   dirtySessionCount(sessionIDs?: Iterable<string>) {
@@ -165,6 +187,61 @@ export class MissionControlRuntimeState {
     const allowed = new Set(sessionIDs)
     return Object.fromEntries(Array.from(this.dirtySessions.entries()).filter(([sessionID]) => allowed.has(sessionID)))
   }
+
+  private refreshSessionMetadata(sessionID: string, payload: unknown) {
+    const previous = this.sessionMetadata.get(sessionID)
+    const parentSessionID = hasParentSessionReference(payload)
+      ? extractParentSessionID(payload)
+      : previous?.parentSessionID
+    const createdAt = extractSessionTimestamp(payload, "created") ?? previous?.createdAt
+    const updatedAt = extractSessionTimestamp(payload, "updated") ?? previous?.updatedAt
+    const previousVersion = previous?.updatedAt ?? previous?.createdAt
+    const nextVersion = updatedAt ?? createdAt
+
+    if (
+      previousVersion !== undefined &&
+      nextVersion !== undefined &&
+      nextVersion < previousVersion
+    ) {
+      return
+    }
+
+    const next: RuntimeSessionMetadata = {
+      sessionID,
+      parentSessionID,
+      title: extractTitle(payload) ?? previous?.title,
+      directory: extractDirectory(payload) ?? previous?.directory,
+      createdAt,
+      updatedAt,
+      observedAt: Date.now(),
+    }
+
+    if (
+      !next.parentSessionID &&
+      !next.title &&
+      !next.directory &&
+      next.createdAt === undefined &&
+      next.updatedAt === undefined
+    ) {
+      return
+    }
+
+    if (previous?.parentSessionID && previous.parentSessionID !== next.parentSessionID) {
+      const previousChildren = this.childSessionIDsByParent.get(previous.parentSessionID)
+      previousChildren?.delete(sessionID)
+      if (previousChildren && previousChildren.size === 0) {
+        this.childSessionIDsByParent.delete(previous.parentSessionID)
+      }
+    }
+
+    if (next.parentSessionID) {
+      const siblings = this.childSessionIDsByParent.get(next.parentSessionID) ?? new Set<string>()
+      siblings.add(sessionID)
+      this.childSessionIDsByParent.set(next.parentSessionID, siblings)
+    }
+
+    this.sessionMetadata.set(sessionID, next)
+  }
 }
 
 const shouldMarkSessionDirty = (type: string) =>
@@ -177,3 +254,6 @@ const shouldMarkSessionDirty = (type: string) =>
     "message.part.updated",
     "message.part.removed",
   ].includes(type)
+
+const shouldRefreshSessionMetadata = (type: string) =>
+  ["session.created", "session.updated", "session.status", "session.idle", "session.error"].includes(type)

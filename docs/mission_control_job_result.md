@@ -27,6 +27,7 @@ A stable result snapshot containing:
 - `headline`
 - `summary`
 - `blockers`
+- `recommendedNextStep` when the child session reported one
 - `keyMessageIDs`
 - `state`
 - `observedAt`

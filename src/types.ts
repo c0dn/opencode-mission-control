@@ -103,6 +103,7 @@ export interface BackgroundJob {
   completedAt?: number
   failureReason?: string
   lastObservedEvent?: string
+  lastSourceUpdatedAt?: number
   relayState: "not_requested" | "pending" | "delivered" | "failed"
 }
 
@@ -113,8 +114,31 @@ export interface JobResultSnapshot {
   headline: string
   summary: string
   blockers: string[]
+  recommendedNextStep?: string
   keyMessageIDs: string[]
   observedAt: number
+}
+
+export interface JobLifecycleEvent {
+  eventID: string
+  jobID: string
+  parentSessionID: string
+  childSessionID?: string
+  type: string
+  state: JobState
+  previousState?: JobState
+  at: number
+  detail?: string
+}
+
+export interface ParentRelayPayload {
+  jobID: string
+  childSessionID: string
+  title: string
+  state: "idle" | "completed" | "failed" | "aborted"
+  summary: string
+  blockers: string[]
+  recommendedNextStep?: string
 }
 
 export interface JobStatusResult {
@@ -184,6 +208,16 @@ export interface MissionControlEventRecord {
   at: number
   sessionID?: string
   summary: string
+}
+
+export interface RuntimeSessionMetadata {
+  sessionID: string
+  parentSessionID?: string
+  title?: string
+  directory?: string
+  createdAt?: number
+  updatedAt?: number
+  observedAt: number
 }
 
 export interface ToolCallerContext {
@@ -259,6 +293,7 @@ export interface SessionSearchMatch {
   messageID: string
   partID?: string
   score: number
+  matchType: "exact" | "candidate"
   title?: string
   snippet: string
   role: string

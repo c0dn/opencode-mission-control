@@ -1,6 +1,7 @@
 import { OpenCodeAdapter } from "./opencode-client.js"
 import { MissionControlRuntimeState } from "./runtime-state.js"
 import {
+  extractDirectory,
   extractParentSessionID,
   extractSessionID,
   extractStatus,
@@ -9,12 +10,6 @@ import {
 } from "./session-extractors.js"
 import type { SessionObserveResult, SessionReadResult, SessionTranscriptEntry, SessionTreeNode, ToolResult } from "./types.js"
 import { fail, ok } from "./types.js"
-
-const extractSessionDirectory = (session: unknown) => {
-  return typeof (session as { directory?: unknown } | undefined)?.directory === "string"
-    ? ((session as { directory?: string }).directory ?? undefined)
-    : undefined
-}
 
 export class MissionControlSessionService {
   constructor(private readonly state: MissionControlRuntimeState) {}
@@ -35,7 +30,7 @@ export class MissionControlSessionService {
       const resolved = await adapter.resolveSession(sessionID)
       relatedSessions.push({
         sessionID,
-        directory: resolved.directory ?? extractSessionDirectory(resolved.session),
+        directory: resolved.directory ?? extractDirectory(resolved.session),
       })
     } catch {
       return fail("ParentSessionNotFound", `Session '${sessionID}' was not found.`)
@@ -48,9 +43,10 @@ export class MissionControlSessionService {
         for (const child of children) {
           const childID = extractSessionID(child)
           if (childID) {
+            const cachedMetadata = this.state.metadataForSession(childID)
             relatedSessions.push({
               sessionID: childID,
-              directory: extractSessionDirectory(child) ?? parentDirectory,
+              directory: extractDirectory(child) ?? cachedMetadata?.directory ?? parentDirectory,
             })
           }
         }
@@ -147,7 +143,7 @@ export class MissionControlSessionService {
     try {
       const resolved = await adapter.resolveSession(sessionID)
       session = resolved.session
-      sessionDirectory = resolved.directory ?? extractSessionDirectory(resolved.session)
+      sessionDirectory = resolved.directory ?? extractDirectory(resolved.session)
     } catch {
       return fail("ParentSessionNotFound", `Session '${sessionID}' was not found.`)
     }
@@ -160,12 +156,13 @@ export class MissionControlSessionService {
         const children = await adapter.getSessionChildren(sessionID, sessionDirectory)
         childSummaries = children.map((child) => {
           const childID = extractSessionID(child) ?? "unknown"
+          const cachedMetadata = this.state.metadataForSession(childID)
           sessionIDs.add(childID)
 
           return {
             sessionID: childID,
             status: this.state.statusForSession(childID, extractStatus(child)),
-            title: extractTitle(child),
+            title: extractTitle(child) ?? cachedMetadata?.title,
           }
         })
       } catch {
@@ -195,11 +192,12 @@ export class MissionControlSessionService {
     seededDirectory?: string,
   ): Promise<SessionTreeNode> {
     const session = seededSession ?? (await adapter.getSession(sessionID, seededDirectory))
-    const sessionDirectory = extractSessionDirectory(session) ?? seededDirectory
+    const cachedMetadata = this.state.metadataForSession(sessionID)
+    const sessionDirectory = extractDirectory(session) ?? cachedMetadata?.directory ?? seededDirectory
     const node: SessionTreeNode = {
       sessionID,
-      title: extractTitle(session),
-      parentSessionID: extractParentSessionID(session),
+      title: extractTitle(session) ?? cachedMetadata?.title,
+      parentSessionID: extractParentSessionID(session) ?? cachedMetadata?.parentSessionID,
       status: this.state.statusForSession(sessionID, extractStatus(session)),
       children: [],
     }
@@ -215,8 +213,16 @@ export class MissionControlSessionService {
         continue
       }
 
+      const childMetadata = this.state.metadataForSession(childID)
+
       node.children.push(
-        await this.buildTree(adapter, childID, depth - 1, child, extractSessionDirectory(child) ?? sessionDirectory),
+        await this.buildTree(
+          adapter,
+          childID,
+          depth - 1,
+          child,
+          extractDirectory(child) ?? childMetadata?.directory ?? sessionDirectory,
+        ),
       )
     }
 

@@ -119,8 +119,9 @@ interface MissionControlConfig {
 
 - `autoApprovePermissions` must remain `false` in the MVP.
 - `autoAnswerQuestions` must remain `false` in the MVP.
+- `requireExplicitParentOnAmbiguousAttach` must remain `true` in the MVP.
 - `maxConcurrent` must be enforced by the scheduler.
-- The runtime config layer must ignore attempts to override `autoApprovePermissions` or `autoAnswerQuestions` away from `false`.
+- The runtime config layer must ignore attempts to override `requireExplicitParentOnAmbiguousAttach`, `autoApprovePermissions`, or `autoAnswerQuestions` away from their MVP-safe values.
 
 ---
 
@@ -186,6 +187,7 @@ interface JobResultSnapshot {
   headline: string;
   summary: string;
   blockers: string[];
+  recommendedNextStep?: string;
   keyMessageIDs: string[];
   observedAt: number;
 }
@@ -292,6 +294,7 @@ interface SessionSearchResult {
     messageID: string;
     partID?: string;
     score: number;
+    matchType: "exact" | "candidate";
     title?: string;
     snippet: string;
     role: string;
@@ -507,10 +510,10 @@ Current MVP note:
 
 - The shipping implementation uses JSON sidecars under `~/.cache/opencode-mission-control/<scope-hash>/` rather than a relational sidecar DB.
 - `search-index.<scope>.json` currently covers the `mc_session_chunk` store, per-session cursors, and optional semantic/query-vector cache.
-- `jobs.json` currently covers `mc_job` and `mc_job_result` snapshots.
+- `jobs.json` currently covers `mc_job`, `mc_job_event`, and `mc_job_result` snapshots.
 - The search index now includes persisted per-session cursor/checkpoint state so unchanged sessions can be incrementally reused during rebuilds.
 - Dirty transcript invalidations are persisted separately so message-part edits can still force a rebuild after restart even when a session's `updatedAt` marker is unchanged.
-- `mc_job_event` remains deferred; the current MVP still does not persist a normalized lifecycle-event log.
+- Job lifecycle events are persisted as normalized records alongside jobs and result snapshots.
 
 ### Persistence rules
 

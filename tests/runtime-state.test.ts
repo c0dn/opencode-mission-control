@@ -92,4 +92,60 @@ describe("MissionControlRuntimeState", () => {
 
     expect(state.dirtySessionIDs().sort()).toEqual(["session-compacted", "session-removed"])
   })
+
+  test("caches session metadata and parent-child bindings from session lifecycle events", () => {
+    const state = new MissionControlRuntimeState(10)
+
+    state.recordEvent("session.created", {
+      sessionID: "child-session",
+      parentID: "parent-a",
+      title: "Child Session",
+      directory: "/tmp/project-a",
+      time: { created: 1, updated: 2 },
+    })
+
+    expect(state.metadataForSession("child-session")).toMatchObject({
+      sessionID: "child-session",
+      parentSessionID: "parent-a",
+      title: "Child Session",
+      directory: "/tmp/project-a",
+      createdAt: 1,
+      updatedAt: 2,
+    })
+    expect(state.childSessionIDs("parent-a")).toEqual(["child-session"])
+
+    state.recordEvent("session.updated", {
+      sessionID: "child-session",
+      parentID: "parent-b",
+      title: "Child Session Renamed",
+      time: { updated: 3 },
+    })
+
+    expect(state.metadataForSession("child-session")).toMatchObject({
+      parentSessionID: "parent-b",
+      title: "Child Session Renamed",
+      updatedAt: 3,
+    })
+    expect(state.childSessionIDs("parent-a")).toEqual([])
+    expect(state.childSessionIDs("parent-b")).toEqual(["child-session"])
+
+    state.recordEvent("session.updated", {
+      sessionID: "child-session",
+      parentID: null,
+      time: { updated: 4 },
+    })
+
+    expect(state.metadataForSession("child-session")?.parentSessionID).toBeUndefined()
+    expect(state.childSessionIDs("parent-b")).toEqual([])
+
+    state.recordEvent("session.updated", {
+      sessionID: "child-session",
+      parentID: "stale-parent",
+      title: "Stale Title",
+      time: { updated: 2 },
+    })
+
+    expect(state.metadataForSession("child-session")?.title).toBe("Child Session Renamed")
+    expect(state.childSessionIDs("stale-parent")).toEqual([])
+  })
 })

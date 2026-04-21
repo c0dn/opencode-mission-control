@@ -58,6 +58,7 @@ export const createMissionControlConfig = (
   safety: {
     ...DEFAULT_CONFIG.safety,
     ...overrides.safety,
+    requireExplicitParentOnAmbiguousAttach: true,
     autoApprovePermissions: false,
     autoAnswerQuestions: false,
   },

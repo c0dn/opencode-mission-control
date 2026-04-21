@@ -63,33 +63,56 @@ export const extractSessionID = (value: unknown): string | undefined => {
 }
 
 export const extractParentSessionID = (value: unknown): string | undefined => {
+  return extractStringCandidate(value, ["parentSessionID", "parentID", "parentId"])
+}
+
+export const hasParentSessionReference = (value: unknown): boolean => {
   if (!value || typeof value !== "object") {
-    return undefined
+    return false
   }
 
   const record = value as Record<string, unknown>
-  const candidates = [record.parentSessionID, record.parentID, record.parentId]
-
-  for (const candidate of candidates) {
-    if (typeof candidate === "string") {
-      return candidate
-    }
+  if ("parentSessionID" in record || "parentID" in record || "parentId" in record) {
+    return true
   }
 
-  return undefined
+  return [record.properties, record.info, record.session].some((nested) => hasParentSessionReference(nested))
 }
 
 export const extractTitle = (value: unknown): string | undefined => {
+  return extractStringCandidate(value, ["title", "name"])
+}
+
+export const extractDirectory = (value: unknown): string | undefined => {
+  return extractStringCandidate(value, ["directory"])
+}
+
+export const extractSessionTimestamp = (
+  value: unknown,
+  kind: "created" | "updated",
+): number | undefined => {
   if (!value || typeof value !== "object") {
     return undefined
   }
 
   const record = value as Record<string, unknown>
-  const candidates = [record.title, record.name]
+  const directCandidates =
+    kind === "created"
+      ? [record.createdAt, record.created, extractTimeValue(record.time, "created")]
+      : [record.updatedAt, record.updated, extractTimeValue(record.time, "updated")]
 
-  for (const candidate of candidates) {
-    if (typeof candidate === "string") {
-      return candidate
+  for (const candidate of directCandidates) {
+    const timestamp = asOptionalTimestamp(candidate)
+    if (timestamp !== undefined) {
+      return timestamp
+    }
+  }
+
+  const nestedCandidates = [record.properties, record.info, record.session]
+  for (const nested of nestedCandidates) {
+    const timestamp = extractSessionTimestamp(nested, kind)
+    if (timestamp !== undefined) {
+      return timestamp
     }
   }
 
@@ -217,4 +240,51 @@ const asTimestamp = (value: unknown) => {
   }
 
   return Date.now()
+}
+
+const extractStringCandidate = (value: unknown, keys: string[]): string | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  for (const key of keys) {
+    const candidate = record[key]
+    if (typeof candidate === "string") {
+      return candidate
+    }
+  }
+
+  const nestedCandidates = [record.properties, record.info, record.session]
+  for (const nested of nestedCandidates) {
+    const candidate = extractStringCandidate(nested, keys)
+    if (candidate) {
+      return candidate
+    }
+  }
+
+  return undefined
+}
+
+const extractTimeValue = (value: unknown, key: "created" | "updated") => {
+  if (!value || typeof value !== "object") {
+    return undefined
+  }
+
+  return (value as Record<string, unknown>)[key]
+}
+
+const asOptionalTimestamp = (value: unknown): number | undefined => {
+  if (typeof value === "number") {
+    return value
+  }
+
+  if (typeof value === "string") {
+    const parsed = Date.parse(value)
+    if (!Number.isNaN(parsed)) {
+      return parsed
+    }
+  }
+
+  return undefined
 }

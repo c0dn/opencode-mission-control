@@ -194,4 +194,69 @@ describe("MissionControlSessionService", () => {
 
     expect(result.data.entries.map((entry) => entry.messageID)).toEqual(["msg-1"])
   })
+
+  test("uses cached child directories when includeChildren child records omit directory", async () => {
+    const state = new MissionControlRuntimeState(20)
+    state.recordEvent("session.created", {
+      sessionID: "child-session",
+      parentID: "root-session",
+      directory: "/tmp/child-project",
+      title: "Child Session",
+      time: { created: 2, updated: 3 },
+    })
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async get({ path }: { path: { id: string } }) {
+          return {
+            id: path.id,
+            directory: "/tmp/root-project",
+            title: path.id,
+            time: { created: 1, updated: 2 },
+          }
+        },
+        async children() {
+          return [
+            {
+              id: "child-session",
+              parentID: "root-session",
+              title: "Child Session",
+            },
+          ]
+        },
+        async messages({ path, query }: { path: { id: string }; query?: { directory?: string } }) {
+          if (path.id === "root-session") {
+            expect(query?.directory).toBe("/tmp/root-project")
+            return [
+              {
+                info: { id: "root-message", role: "assistant", time: { created: 1 } },
+                parts: [{ id: "root-part", type: "text", text: "root" }],
+              },
+            ]
+          }
+
+          expect(path.id).toBe("child-session")
+          expect(query?.directory).toBe("/tmp/child-project")
+          return [
+            {
+              info: { id: "child-message", role: "assistant", time: { created: 2 } },
+              parts: [{ id: "child-part", type: "text", text: "child" }],
+            },
+          ]
+        },
+      },
+    })
+
+    const service = new MissionControlSessionService(state)
+    const result = await service.readSession(adapter, "root-session", {
+      includeChildren: true,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected cached-child-directory read to succeed")
+    }
+
+    expect(result.data.entries.map((entry) => entry.messageID)).toEqual(["root-message", "child-message"])
+  })
 })

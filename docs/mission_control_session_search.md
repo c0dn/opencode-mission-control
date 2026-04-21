@@ -38,10 +38,12 @@ mission_control_session_search(query="flag leak", sessionID="ses_123")
   - `discoveryScope`
   - `indexedSessionCount`
   - `indexPath`
+- Each match includes `matchType`, so callers can distinguish an exact lexical hit from a ranked candidate.
 
 ## Search behavior
 
 - `exact=true` forces lexical search.
+- If `exact=true` finds only ranked lexical candidates and no exact lexical hits, Mission Control warns about that instead of pretending the result set is exact.
 - Without `exact=true`, Mission Control auto-selects lexical search for obvious exact queries such as acronyms, quoted phrases, and path-like tokens.
 - Semantic search is optional. If it is not configured or available, search falls back to lexical mode.
 - When semantic search is active, Mission Control caches chunk embeddings and recent query embeddings inside the scope-specific search cache so repeated semantic/hybrid searches can avoid unnecessary embeddings API calls.
