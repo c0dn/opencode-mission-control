@@ -35,5 +35,6 @@ A stable result snapshot containing:
 ## Caveats
 
 - This only succeeds after the job reaches a stable state such as `idle`, `completed`, `failed`, or `aborted`.
+- If Mission Control already captured a stable snapshot before a later restart/orphaning event, that stored snapshot can still be returned.
 - `relayToParent=true` can fail if the job was configured with `relayMode="never"`.
 - If a transcript cannot be captured during finalization, Mission Control falls back to a best-effort result snapshot.

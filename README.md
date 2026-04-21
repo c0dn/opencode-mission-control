@@ -12,6 +12,8 @@ opencode plugin -g opencode-mission-control
 
 Detailed usage and caveats live under `docs/`.
 
+- [`runtime_model.md`](docs/runtime_model.md) — cross-cutting runtime behavior, lifecycle rules, persistence, and non-goals
+
 - [`mission_control_status()`](docs/mission_control_status.md) — runtime health, config, counters, and capability probe
 - [`mission_control_session_read(sessionID, limit?, includeChildren?, includeToolOutputs?)`](docs/mission_control_session_read.md) — read a transcript, optionally including child sessions and raw tool outputs
 - [`mission_control_session_tree(sessionID, depth?)`](docs/mission_control_session_tree.md) — inspect a session’s parent/child tree
