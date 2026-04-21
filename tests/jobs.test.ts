@@ -1347,52 +1347,6 @@ Recommended Next Step: Run the full verification suite before merging.`,
     expect(jobEvents.at(-1)?.state).toBe("completed")
   })
 
-  test("normalizes legacy stored relay modes on load", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
-    tempDirs.push(directory)
-
-    const storePath = getJobsStorePath(directory)
-    await mkdir(dirname(storePath), { recursive: true })
-
-    await writeFile(
-      storePath,
-      JSON.stringify(
-        {
-          version: 1,
-          jobs: [
-            {
-              jobID: "job-legacy",
-              parentSessionID: "parent-session",
-              title: "Legacy Job",
-              prompt: "Legacy prompt",
-              relayMode: "manual_only",
-              state: "completed",
-              createdAt: 1,
-              updatedAt: 2,
-              relayState: "pending",
-            },
-          ],
-          results: [],
-          events: [],
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    )
-
-    const controller = new MissionControlJobController(directory, createMissionControlConfig())
-    await controller.start()
-
-    const status = controller.status("job-legacy")
-    expect(status.ok).toBe(true)
-    if (!status.ok) {
-      throw new Error("Expected legacy job to load")
-    }
-
-    expect(status.data.job.relay).toBe("manual")
-  })
-
   test("returns ParentSessionNotFound when an explicit sessionId cannot be resolved", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)

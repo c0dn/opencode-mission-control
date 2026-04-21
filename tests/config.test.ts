@@ -51,15 +51,6 @@ describe("createMissionControlConfig", () => {
     expect(config.jobs.autoAttachToCurrentSession).toBe(true)
   })
 
-  test("normalizes legacy relay modes to manual", () => {
-    const config = createMissionControlConfig({
-      jobs: {
-        autoRelayToParent: "manual_only" as never,
-      },
-    })
-
-    expect(config.jobs.autoRelayToParent).toBe("manual")
-  })
 })
 
 describe("clampResultLimit", () => {

@@ -126,9 +126,5 @@ export const normalizeRelayMode = (
     return value
   }
 
-  if (value === "manual_only" || value === "never") {
-    return "manual"
-  }
-
   return fallback
 }
