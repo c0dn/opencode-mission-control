@@ -29,6 +29,22 @@ The payload currently includes:
 - `capabilities`
 - `index`
 
+The `capabilities.jobs` object includes fields such as:
+
+- `childSessionLaunch`
+- `asyncPrompt`
+- `resultRelay`
+- `blockedInputRelay`
+- `abort`
+- `permissionReply`
+- `questionReply`
+- `questionReject`
+- `parentReplies`
+- `eventFeed`
+- `progressUpdates`
+
+These are runtime capability probes. Some are tool-specific, so a runtime may support only part of the parent-action surface.
+
 The `index` object includes fields such as:
 
 - `path`

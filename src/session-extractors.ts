@@ -1,4 +1,12 @@
-import type { SessionTranscriptEntry, SessionTranscriptPart } from "./types.js"
+import type {
+  JobPendingPermissionRequest,
+  JobPendingQuestionInfo,
+  JobPendingQuestionOption,
+  JobPendingQuestionRequest,
+  PendingInputToolReference,
+  SessionTranscriptEntry,
+  SessionTranscriptPart,
+} from "./types.js"
 
 export const extractStatus = (value: unknown): string | undefined => {
   if (!value || typeof value !== "object") {
@@ -85,6 +93,55 @@ export const extractTitle = (value: unknown): string | undefined => {
 
 export const extractDirectory = (value: unknown): string | undefined => {
   return extractStringCandidate(value, ["directory"])
+}
+
+export const extractRequestID = (value: unknown): string | undefined => {
+  return extractStringCandidate(value, ["requestID", "requestId", "id"])
+}
+
+export const extractPermissionRequest = (
+  value: unknown,
+): Omit<JobPendingPermissionRequest, "kind" | "askedAt"> | undefined => {
+  const requestId = extractRequestID(value)
+  const sessionId = extractSessionID(value)
+  const permission = extractStringCandidate(value, ["permission"])
+
+  if (!requestId || !sessionId || !permission) {
+    return undefined
+  }
+
+  return {
+    requestId,
+    sessionId,
+    permission,
+    patterns: extractStringArrayCandidate(value, ["patterns"]),
+    always: extractStringArrayCandidate(value, ["always"]),
+    metadata: extractRecordCandidate(value, ["metadata"]),
+    tool: extractToolReference(value),
+  }
+}
+
+export const extractQuestionRequest = (
+  value: unknown,
+): Omit<JobPendingQuestionRequest, "kind" | "askedAt"> | undefined => {
+  const requestId = extractRequestID(value)
+  const sessionId = extractSessionID(value)
+  const record = extractRecordCandidate(value, ["properties"])
+  const questionsValue =
+    extractUnknownCandidate(value, ["questions"]) ??
+    (Object.keys(record).length > 0 ? record.questions : undefined)
+  const questions = normalizeQuestionInfoList(questionsValue)
+
+  if (!requestId || !sessionId || questions.length === 0) {
+    return undefined
+  }
+
+  return {
+    requestId,
+    sessionId,
+    questions,
+    tool: extractToolReference(value),
+  }
 }
 
 export const extractSessionTimestamp = (
@@ -264,6 +321,132 @@ const extractStringCandidate = (value: unknown, keys: string[]): string | undefi
   }
 
   return undefined
+}
+
+const extractUnknownCandidate = (value: unknown, keys: string[]): unknown => {
+  if (!value || typeof value !== "object") {
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  for (const key of keys) {
+    if (key in record) {
+      return record[key]
+    }
+  }
+
+  const nestedCandidates = [record.properties, record.info, record.session]
+  for (const nested of nestedCandidates) {
+    const candidate = extractUnknownCandidate(nested, keys)
+    if (candidate !== undefined) {
+      return candidate
+    }
+  }
+
+  return undefined
+}
+
+const extractStringArrayCandidate = (value: unknown, keys: string[]): string[] => {
+  const candidate = extractUnknownCandidate(value, keys)
+  if (!Array.isArray(candidate)) {
+    return []
+  }
+
+  return candidate.filter((entry): entry is string => typeof entry === "string")
+}
+
+const extractRecordCandidate = (value: unknown, keys: string[]): Record<string, unknown> => {
+  const candidate = extractUnknownCandidate(value, keys)
+  return candidate && typeof candidate === "object" && !Array.isArray(candidate)
+    ? { ...(candidate as Record<string, unknown>) }
+    : {}
+}
+
+const extractToolReference = (value: unknown): PendingInputToolReference | undefined => {
+  const candidate = extractUnknownCandidate(value, ["tool"])
+  if (!candidate || typeof candidate !== "object") {
+    return undefined
+  }
+
+  const record = candidate as Record<string, unknown>
+  const messageId =
+    typeof record.messageID === "string"
+      ? record.messageID
+      : typeof record.messageId === "string"
+        ? record.messageId
+        : undefined
+  const callId =
+    typeof record.callID === "string"
+      ? record.callID
+      : typeof record.callId === "string"
+        ? record.callId
+        : undefined
+
+  if (!messageId || !callId) {
+    return undefined
+  }
+
+  return {
+    messageId,
+    callId,
+  }
+}
+
+const normalizeQuestionInfoList = (value: unknown): JobPendingQuestionInfo[] => {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((entry) => normalizeQuestionInfo(entry))
+    .filter((entry): entry is JobPendingQuestionInfo => Boolean(entry))
+}
+
+const normalizeQuestionInfo = (value: unknown): JobPendingQuestionInfo | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  const question = typeof record.question === "string" ? record.question : undefined
+  const header = typeof record.header === "string" ? record.header : undefined
+  const options = normalizeQuestionOptions(record.options)
+
+  if (!question || !header) {
+    return undefined
+  }
+
+  return {
+    question,
+    header,
+    options,
+    multiple: typeof record.multiple === "boolean" ? record.multiple : undefined,
+    custom: typeof record.custom === "boolean" ? record.custom : undefined,
+  }
+}
+
+const normalizeQuestionOptions = (value: unknown): JobPendingQuestionOption[] => {
+  if (!Array.isArray(value)) {
+    return []
+  }
+
+  return value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") {
+        return undefined
+      }
+
+      const record = entry as Record<string, unknown>
+      if (typeof record.label !== "string" || typeof record.description !== "string") {
+        return undefined
+      }
+
+      return {
+        label: record.label,
+        description: record.description,
+      }
+    })
+    .filter((entry): entry is JobPendingQuestionOption => Boolean(entry))
 }
 
 const extractTimeValue = (value: unknown, key: "created" | "updated") => {

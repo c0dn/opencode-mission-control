@@ -9,7 +9,11 @@ import { extractSessionID } from "./session-extractors.js"
 import { MissionControlSessionService } from "./session-service.js"
 import { MissionControlSourceDB } from "./source-db.js"
 import type {
+  JobEventsArgs,
   JobListArgs,
+  JobPermissionReplyArgs,
+  JobProgressUpdateArgs,
+  JobQuestionReplyArgs,
   JobStartArgs,
   MissionControlCapabilityMatrix,
   MissionControlConfig,
@@ -110,7 +114,27 @@ export class MissionControlServer {
     }
 
     this.started = true
-    await this.jobController.start()
+    try {
+      await this.jobController.start()
+      const loadWarning = this.jobController.consumeLoadWarning()
+      if (loadWarning) {
+        await adapter.log("warn", loadWarning, {
+          directory: this.context.directory,
+          worktree: this.context.worktree,
+        })
+      }
+    } catch (error) {
+      this.jobController.clearRecoveredState()
+      await adapter.log(
+        "warn",
+        "Mission Control could not load the persisted jobs store; starting with an empty in-memory job state instead.",
+        {
+          directory: this.context.directory,
+          worktree: this.context.worktree,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      )
+    }
     await adapter.log("info", "Mission Control plugin initialized", {
       directory: this.context.directory,
       worktree: this.context.worktree,
@@ -130,9 +154,17 @@ export class MissionControlServer {
         recentBuffer: true,
       },
       jobs: {
-        childSessionLaunch: this.config.jobs.enabled,
-        asyncPrompt: this.config.jobs.enabled,
-        resultRelay: this.config.jobs.enabled,
+        childSessionLaunch: this.config.jobs.enabled && this.adapter.supportsChildSessionLaunch(),
+        asyncPrompt: this.config.jobs.enabled && this.adapter.supportsAsyncPrompt(),
+        resultRelay: this.config.jobs.enabled && this.adapter.supportsResultRelay(),
+        blockedInputRelay: this.config.jobs.enabled && this.adapter.supportsResultRelay(),
+        abort: this.config.jobs.enabled && this.adapter.supportsAbortSession(),
+        permissionReply: this.config.jobs.enabled && this.adapter.supportsPermissionReply(),
+        questionReply: this.config.jobs.enabled && this.adapter.supportsQuestionReply(),
+        questionReject: this.config.jobs.enabled && this.adapter.supportsQuestionReject(),
+        parentReplies: this.config.jobs.enabled && this.adapter.supportsParentReplies(),
+        eventFeed: this.config.jobs.enabled,
+        progressUpdates: this.config.jobs.enabled,
       },
     }
   }
@@ -237,14 +269,38 @@ export class MissionControlServer {
     return this.jobController.listJobs(args)
   }
 
-  async cancelJob(jobID: string) {
-    const adapter = this.adapter
-    return this.jobController.cancelJob(adapter, jobID)
+  jobEvents(args: JobEventsArgs) {
+    return this.jobController.jobEvents(args.jobId, args.limit)
   }
 
-  async jobResult(jobID: string, sendToParent: boolean) {
+  async updateJobProgress(args: JobProgressUpdateArgs, caller: ToolCallerContext = {}) {
     const adapter = this.adapter
-    return this.jobController.getResult(adapter, jobID, sendToParent)
+    return this.jobController.updateProgress(adapter, args, caller)
+  }
+
+  async replyJobPermission(args: JobPermissionReplyArgs, caller: ToolCallerContext = {}) {
+    const adapter = this.adapter
+    return this.jobController.replyPermission(adapter, args, caller)
+  }
+
+  async replyJobQuestion(args: JobQuestionReplyArgs, caller: ToolCallerContext = {}) {
+    const adapter = this.adapter
+    return this.jobController.replyQuestion(adapter, args, caller)
+  }
+
+  async rejectJobQuestion(jobId: string, caller: ToolCallerContext = {}) {
+    const adapter = this.adapter
+    return this.jobController.rejectQuestion(adapter, jobId, caller)
+  }
+
+  async cancelJob(jobID: string, caller: ToolCallerContext = {}) {
+    const adapter = this.adapter
+    return this.jobController.cancelJob(adapter, jobID, caller)
+  }
+
+  async jobResult(jobID: string, sendToParent: boolean, caller: ToolCallerContext = {}) {
+    const adapter = this.adapter
+    return this.jobController.getResult(adapter, jobID, sendToParent, caller)
   }
 
   notImplemented(feature: string, suggestion?: string) {

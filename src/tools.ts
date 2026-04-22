@@ -95,7 +95,6 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       prompt: tool.schema.string(),
       sessionId: tool.schema.string().optional(),
       title: tool.schema.string().optional(),
-      relay: tool.schema.enum(["manual", "on_idle", "on_completion"]).optional(),
     },
     async execute(args, context) {
       return toPluginToolResult(
@@ -104,7 +103,6 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
             prompt: args.prompt,
             sessionId: args.sessionId,
             title: args.title,
-            relay: args.relay,
           },
           {
             sessionId: context.sessionID,
@@ -123,6 +121,17 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     },
     async execute(args) {
       return toPluginToolResult(server.jobStatus(args.jobId))
+    },
+  }),
+
+  mc_job_events: tool({
+    description: "Return persisted events for a background job",
+    args: {
+      jobId: tool.schema.string(),
+      limit: tool.schema.number().optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(server.jobEvents({ jobId: args.jobId, limit: args.limit }))
     },
   }),
 
@@ -157,13 +166,106 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     },
   }),
 
+  mc_job_update: tool({
+    description: "Record a child progress update for a background job",
+    args: {
+      jobId: tool.schema.string().optional(),
+      message: tool.schema.string(),
+      notifyParent: tool.schema.boolean().optional(),
+    },
+    async execute(args, context) {
+      return toPluginToolResult(
+        await server.updateJobProgress(
+          {
+            jobId: args.jobId,
+            message: args.message,
+            notifyParent: args.notifyParent,
+          },
+          {
+            sessionId: context.sessionID,
+            directory: context.directory,
+            worktree: context.worktree,
+          },
+        ),
+      )
+    },
+  }),
+
+  mc_job_permission_reply: tool({
+    description: "Reply to a pending permission request for a background job",
+    args: {
+      jobId: tool.schema.string(),
+      reply: tool.schema.enum(["once", "always", "reject"]),
+      message: tool.schema.string().optional(),
+    },
+    async execute(args, context) {
+      return toPluginToolResult(
+        await server.replyJobPermission({
+            jobId: args.jobId,
+            reply: args.reply,
+            message: args.message,
+          },
+          {
+            sessionId: context.sessionID,
+            directory: context.directory,
+            worktree: context.worktree,
+          },
+        ),
+      )
+    },
+  }),
+
+  mc_job_question_reply: tool({
+    description: "Reply to a pending question request for a background job",
+    args: {
+      jobId: tool.schema.string(),
+      answers: tool.schema.array(tool.schema.array(tool.schema.string())),
+    },
+    async execute(args, context) {
+      return toPluginToolResult(
+        await server.replyJobQuestion({
+            jobId: args.jobId,
+            answers: args.answers,
+          },
+          {
+            sessionId: context.sessionID,
+            directory: context.directory,
+            worktree: context.worktree,
+          },
+        ),
+      )
+    },
+  }),
+
+  mc_job_question_reject: tool({
+    description: "Reject a pending question request for a background job",
+    args: {
+      jobId: tool.schema.string(),
+    },
+    async execute(args, context) {
+      return toPluginToolResult(
+        await server.rejectJobQuestion(args.jobId, {
+          sessionId: context.sessionID,
+          directory: context.directory,
+          worktree: context.worktree,
+        }),
+      )
+    },
+  }),
+
   mc_job_abort: tool({
     description: "Abort a running background job",
     args: {
       jobId: tool.schema.string(),
     },
-    async execute(args) {
-      return toPluginToolResult(await server.cancelJob(args.jobId))
+    async execute(args, context) {
+      return toPluginToolResult(
+        await server.cancelJob(args.jobId, {
+          sessionId: context.sessionID,
+          directory: context.directory,
+          worktree: context.worktree,
+        }),
+      )
     },
   }),
 
@@ -173,8 +275,14 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       jobId: tool.schema.string(),
       sendToParent: tool.schema.boolean().optional(),
     },
-    async execute(args) {
-      return toPluginToolResult(await server.jobResult(args.jobId, args.sendToParent ?? false))
+    async execute(args, context) {
+      return toPluginToolResult(
+        await server.jobResult(args.jobId, args.sendToParent ?? false, {
+          sessionId: context.sessionID,
+          directory: context.directory,
+          worktree: context.worktree,
+        }),
+      )
     },
   }),
 })

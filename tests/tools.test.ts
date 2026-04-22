@@ -99,3 +99,121 @@ describe("mc_session_read tool", () => {
     ])
   })
 })
+
+describe("job tools", () => {
+  test("mc_job_events forwards the public args unchanged", async () => {
+    const calls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      jobEvents(args: unknown) {
+        calls.push(args)
+        return {
+          ok: true,
+          data: {
+            jobId: "job_123",
+            events: [],
+          },
+        }
+      },
+    } as any)
+
+    await tools.mc_job_events.execute({ jobId: "job_123", limit: 15 } as any, {} as any)
+
+    expect(Object.keys(tools.mc_job_events.args).sort()).toEqual(["jobId", "limit"])
+    expect(calls).toEqual([{ jobId: "job_123", limit: 15 }])
+  })
+
+  test("mc_job_update forwards caller context for child-session inference", async () => {
+    const calls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async updateJobProgress(args: unknown, caller: unknown) {
+        calls.push({ args, caller })
+        return {
+          ok: true,
+          data: {
+            job: {
+              jobId: "job_123",
+              sessionId: "ses_parent",
+              title: "Background work",
+              prompt: "Do work",
+              state: "running",
+              createdAt: 1,
+              updatedAt: 2,
+              relayState: "pending",
+            },
+            event: {
+              eventId: "evt_1",
+              jobId: "job_123",
+              sessionId: "ses_parent",
+              type: "job.progress",
+              state: "running",
+              at: 2,
+              detail: "checkpoint",
+            },
+          },
+        }
+      },
+    } as any)
+
+    await tools.mc_job_update.execute(
+      {
+        message: "checkpoint",
+        notifyParent: true,
+      } as any,
+      {
+        sessionID: "child-session",
+        directory: "/tmp/project",
+        worktree: "/tmp/project",
+      } as any,
+    )
+
+    expect(Object.keys(tools.mc_job_update.args).sort()).toEqual(["jobId", "message", "notifyParent"].sort())
+    expect(calls).toEqual([
+      {
+        args: {
+          jobId: undefined,
+          message: "checkpoint",
+          notifyParent: true,
+        },
+        caller: {
+          sessionId: "child-session",
+          directory: "/tmp/project",
+          worktree: "/tmp/project",
+        },
+      },
+    ])
+  })
+
+  test("permission and question reply tools forward the public v2 args", async () => {
+    const permissionCalls: unknown[] = []
+    const questionCalls: unknown[] = []
+    const rejectCalls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async replyJobPermission(args: unknown) {
+        permissionCalls.push(args)
+        return { ok: true, data: {} }
+      },
+      async replyJobQuestion(args: unknown) {
+        questionCalls.push(args)
+        return { ok: true, data: {} }
+      },
+      async rejectJobQuestion(jobId: string) {
+        rejectCalls.push(jobId)
+        return { ok: true, data: {} }
+      },
+    } as any)
+
+    await tools.mc_job_permission_reply.execute({ jobId: "job_123", reply: "once", message: "ok" } as any, {} as any)
+    await tools.mc_job_question_reply.execute({ jobId: "job_123", answers: [["src/"]] } as any, {} as any)
+    await tools.mc_job_question_reject.execute({ jobId: "job_123" } as any, {} as any)
+
+    expect(permissionCalls).toEqual([{ jobId: "job_123", reply: "once", message: "ok" }])
+    expect(questionCalls).toEqual([{ jobId: "job_123", answers: [["src/"]] }])
+    expect(rejectCalls).toEqual(["job_123"])
+  })
+})

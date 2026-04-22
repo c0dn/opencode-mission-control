@@ -7,7 +7,8 @@ export type ParentResolutionMode =
   | "current_session"
   | "scope_latest_session"
 
-export type RelayMode = "manual" | "on_idle" | "on_completion"
+export type PermissionReplyMode = "once" | "always" | "reject"
+export type PendingInputKind = "permission" | "question"
 
 export type JobState =
   | "queued"
@@ -62,7 +63,6 @@ export interface MissionControlConfig {
     maxConcurrent: number
     autoAttachToCurrentSession: boolean
     allowLatestSessionFallback: boolean
-    autoRelayToParent: RelayMode
     titlePrefix: string
     keepChildSessionOnCompletion: boolean
   }
@@ -95,7 +95,6 @@ export interface BackgroundJob {
   childDirectory?: string
   title: string
   prompt: string
-  relayMode: RelayMode
   state: JobState
   createdAt: number
   updatedAt: number
@@ -104,7 +103,10 @@ export interface BackgroundJob {
   failureReason?: string
   lastObservedEvent?: string
   lastSourceUpdatedAt?: number
-  relayState: "not_requested" | "pending" | "delivered" | "failed"
+  relayState: "pending" | "delivered" | "failed"
+  pendingInput?: JobPendingInput
+  lastResolvedPendingKind?: PendingInputKind
+  lastResolvedPendingRequestID?: string
 }
 
 export interface JobResultSnapshot {
@@ -129,7 +131,49 @@ export interface JobLifecycleEvent {
   previousState?: JobState
   at: number
   detail?: string
+  metadata?: Record<string, unknown>
 }
+
+export interface PendingInputToolReference {
+  messageId: string
+  callId: string
+}
+
+export interface JobPendingPermissionRequest {
+  kind: "permission"
+  requestId: string
+  sessionId: string
+  permission: string
+  patterns: string[]
+  always: string[]
+  metadata: Record<string, unknown>
+  tool?: PendingInputToolReference
+  askedAt: number
+}
+
+export interface JobPendingQuestionOption {
+  label: string
+  description: string
+}
+
+export interface JobPendingQuestionInfo {
+  header: string
+  question: string
+  options: JobPendingQuestionOption[]
+  multiple?: boolean
+  custom?: boolean
+}
+
+export interface JobPendingQuestionRequest {
+  kind: "question"
+  requestId: string
+  sessionId: string
+  questions: JobPendingQuestionInfo[]
+  tool?: PendingInputToolReference
+  askedAt: number
+}
+
+export type JobPendingInput = JobPendingPermissionRequest | JobPendingQuestionRequest
 
 export interface ParentRelayPayload {
   jobID: string
@@ -146,11 +190,37 @@ export interface JobStatusResult {
   result?: MissionControlJobResult
 }
 
+export interface JobEventsResult {
+  jobId: string
+  events: MissionControlJobEvent[]
+}
+
 export interface JobStartArgs {
   prompt: string
   sessionId?: string
   title?: string
-  relay?: RelayMode
+}
+
+export interface JobEventsArgs {
+  jobId: string
+  limit?: number
+}
+
+export interface JobProgressUpdateArgs {
+  jobId?: string
+  message: string
+  notifyParent?: boolean
+}
+
+export interface JobPermissionReplyArgs {
+  jobId: string
+  reply: PermissionReplyMode
+  message?: string
+}
+
+export interface JobQuestionReplyArgs {
+  jobId: string
+  answers: string[][]
 }
 
 export interface JobStartResult {
@@ -199,6 +269,14 @@ export interface MissionControlCapabilityMatrix {
     childSessionLaunch: boolean
     asyncPrompt: boolean
     resultRelay: boolean
+    blockedInputRelay: boolean
+    abort: boolean
+    permissionReply: boolean
+    questionReply: boolean
+    questionReject: boolean
+    parentReplies: boolean
+    eventFeed: boolean
+    progressUpdates: boolean
   }
 }
 
@@ -361,7 +439,6 @@ export interface MissionControlJob {
   childDirectory?: string
   title: string
   prompt: string
-  relay: RelayMode
   state: JobState
   createdAt: number
   updatedAt: number
@@ -370,7 +447,21 @@ export interface MissionControlJob {
   failureReason?: string
   lastObservedEvent?: string
   lastSourceUpdatedAt?: number
-  relayState: "not_requested" | "pending" | "delivered" | "failed"
+  relayState: "pending" | "delivered" | "failed"
+  pendingInput?: JobPendingInput
+}
+
+export interface MissionControlJobEvent {
+  eventId: string
+  jobId: string
+  sessionId: string
+  childSessionId?: string
+  type: string
+  state: JobState
+  previousState?: JobState
+  at: number
+  detail?: string
+  metadata?: Record<string, unknown>
 }
 
 export interface MissionControlJobResult {
@@ -383,6 +474,11 @@ export interface MissionControlJobResult {
   recommendedNextStep?: string
   keyMessageIds: string[]
   observedAt: number
+}
+
+export interface JobProgressUpdateResult {
+  job: MissionControlJob
+  event: MissionControlJobEvent
 }
 
 export type DeepPartial<T> = {

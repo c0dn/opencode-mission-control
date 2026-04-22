@@ -45,6 +45,18 @@ describe("MissionControlServer", () => {
                 },
               ]
             },
+            async create() {
+              return { id: "child-session", directory }
+            },
+            async promptAsync() {
+              return undefined
+            },
+            async prompt() {
+              return true
+            },
+            async abort() {
+              return true
+            },
           },
           app: {
             async log() {
@@ -69,6 +81,13 @@ describe("MissionControlServer", () => {
     expect(status.index.discoveryDirectory).toBe(directory)
     expect(status.index.indexedSessionCount).toBe(1)
     expect(status.index.dirtySessionCount).toBe(0)
+    expect(status.capabilities.jobs).toMatchObject({
+      childSessionLaunch: true,
+      blockedInputRelay: true,
+      parentReplies: false,
+      eventFeed: true,
+      progressUpdates: true,
+    })
   })
 
   test("status reports the most recently built scope-specific index", async () => {

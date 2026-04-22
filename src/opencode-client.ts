@@ -23,6 +23,38 @@ const unwrap = <T>(value: MaybeData<T>): T => {
 export class OpenCodeAdapter {
   constructor(private readonly client: any) {}
 
+  supportsChildSessionLaunch() {
+    return Boolean(this.client?.session?.create)
+  }
+
+  supportsAsyncPrompt() {
+    return Boolean(this.client?.session?.promptAsync)
+  }
+
+  supportsResultRelay() {
+    return Boolean(this.client?.session?.prompt)
+  }
+
+  supportsAbortSession() {
+    return Boolean(this.client?.session?.abort)
+  }
+
+  supportsPermissionReply() {
+    return Boolean(this.client?.permission?.reply)
+  }
+
+  supportsQuestionReply() {
+    return Boolean(this.client?.question?.reply)
+  }
+
+  supportsQuestionReject() {
+    return Boolean(this.client?.question?.reject)
+  }
+
+  supportsParentReplies() {
+    return Boolean(this.supportsPermissionReply() && this.supportsQuestionReply() && this.supportsQuestionReject())
+  }
+
   private withDirectoryQuery<T extends QueryInput>(input: T, directory?: string): T {
     if (typeof directory !== "string") {
       return input
@@ -136,6 +168,69 @@ export class OpenCodeAdapter {
 
   async abortSession(sessionID: string, directory?: string) {
     return unwrap(await this.client.session.abort(this.withDirectoryQuery({ path: { id: sessionID } }, directory)))
+  }
+
+  async listPendingPermissions(directory?: string) {
+    if (!this.client?.permission?.list) {
+      throw new Error("OpenCode client does not expose permission.list")
+    }
+
+    return unwrap(await this.client.permission.list(typeof directory === "string" ? { directory } : undefined)) as any[]
+  }
+
+  async replyPermissionRequest(
+    requestID: string,
+    reply: "once" | "always" | "reject",
+    message?: string,
+    directory?: string,
+  ) {
+    if (!this.client?.permission?.reply) {
+      throw new Error("OpenCode client does not expose permission.reply")
+    }
+
+    return unwrap(
+      await this.client.permission.reply({
+        requestID,
+        reply,
+        message,
+        ...(typeof directory === "string" ? { directory } : {}),
+      }),
+    )
+  }
+
+  async listPendingQuestions(directory?: string) {
+    if (!this.client?.question?.list) {
+      throw new Error("OpenCode client does not expose question.list")
+    }
+
+    return unwrap(await this.client.question.list(typeof directory === "string" ? { directory } : undefined)) as any[]
+  }
+
+  async replyQuestionRequest(requestID: string, answers: string[][], directory?: string) {
+    if (!this.client?.question?.reply) {
+      throw new Error("OpenCode client does not expose question.reply")
+    }
+
+    return unwrap(
+      await this.client.question.reply({
+        requestID,
+        answers,
+        ...(typeof directory === "string" ? { directory } : {}),
+      }),
+    )
+  }
+
+  async rejectQuestionRequest(requestID: string, directory?: string) {
+    if (!this.client?.question?.reject) {
+      throw new Error("OpenCode client does not expose question.reject")
+    }
+
+    return unwrap(
+      await this.client.question.reject({
+        requestID,
+        ...(typeof directory === "string" ? { directory } : {}),
+      }),
+    )
   }
 
   async promptNoReply(sessionID: string, text: string, directory?: string) {

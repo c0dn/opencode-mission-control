@@ -32,6 +32,14 @@ export class MissionControlJobLauncher {
       )
     }
 
+    if (!adapter.supportsChildSessionLaunch() || !adapter.supportsAsyncPrompt()) {
+      return fail(
+        "JobLaunchFailed",
+        "The current OpenCode runtime does not support attached background job launch.",
+        "Make sure child-session creation and async prompting are available in the current runtime.",
+      )
+    }
+
     if (!this.controller.tryReserveLaunchSlot(config.jobs.maxConcurrent)) {
       return fail(
         "JobLaunchFailed",

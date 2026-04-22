@@ -80,6 +80,8 @@ Allowed transitions:
 
 ```text
 queued -> launching -> running
+launching -> failed
+launching -> orphaned
 running -> waiting_permission
 running -> waiting_question
 running -> idle
@@ -100,7 +102,7 @@ orphaned -> (terminal unless explicitly recovered later)
 Semantics:
 
 - `idle` means the child became idle, but Mission Control may still need to relay or finalize the result
-- `completed` means Mission Control captured a stable result snapshot and finished any configured completion work
+- `completed` means Mission Control captured a stable result snapshot and finished final relay/finalization work
 - `orphaned` means Mission Control lost live control before the job reached a clean terminal state in the current runtime
 
 Restart behavior:
@@ -120,6 +122,8 @@ Attached child sessions are prompted to end with these headings:
 - `Recommended Next Step`
 
 Mission Control uses event/state tracking as the source of truth for lifecycle state, but it also parses those headings when present to improve stored summaries and relays.
+
+For long-running work, attached child sessions may also call `mc_job_update({ message, notifyParent? })` to append progress events without ending the job.
 
 ## Event handling model
 
@@ -160,6 +164,7 @@ Persistence rules:
 - OpenCode storage is treated as read-only
 - directory-scoped and global-unscoped indexes stay distinguishable
 - sidecar writes are best-effort and aim to be idempotent where practical
+- some reply/progress mutations can succeed in memory even if the sidecar write fails, so an immediate restart can still lose the newest job-event or blocked-state mutation
 - unchanged sessions are incrementally reused through persisted cursors/checkpoints
 
 ## Parent relay semantics
@@ -179,12 +184,36 @@ Delivery rules:
 - at-most-once by default per finalized stored snapshot
 - explicit redelivery is allowed through `mc_job_result({ jobId, sendToParent: true })`
 - relay failure must not erase the stored result snapshot
+- terminal completion, failure, and abort outcomes notify the parent automatically
+- blocked permission/question requests are relayed to the parent session as concise notifications with the relevant reply tool path when Mission Control can resolve the active pending request
+- sparse blocked-state fallbacks may still send a generic blocked notification before normalized pending input is available
+- child progress updates are stored in the job event feed and only relay to the parent when `notifyParent: true`
 
-Public relay modes:
+## Blocked child input bridge
 
-- `manual` stores the result without automatic parent delivery
-- `on_idle` relays when the child session settles after useful work
-- `on_completion` relays on idle and also on stable failure or abort completion paths
+When a tracked child session emits `permission.asked` or `question.asked`:
+
+- Mission Control stores a normalized pending request on the job when request details are available
+- the job moves to `waiting_permission` or `waiting_question`
+- a concise notification is relayed to the parent session when Mission Control can resolve the active pending request
+- if request details are not available yet, Mission Control may send a generic blocked notification first and attach normalized pending input later
+- the parent can respond with `mc_job_permission_reply`, `mc_job_question_reply`, or `mc_job_question_reject`
+
+This is a Mission Control relay and reply bridge, not a mirrored native approval UI.
+
+## Job event feed
+
+Mission Control persists a per-job event stream in `jobs.json`.
+
+The feed includes:
+
+- lifecycle events such as `job.created`, `job.launched`, `session.idle`, and `job.relay_delivered`
+- blocked-input events such as `permission.asked`, `question.asked`, and their reply/reject outcomes
+- child progress events recorded through `mc_job_update`
+
+`mc_job_events` reads this persisted feed. Unlike `mc_session_events`, it survives runtime restart as long as the same Mission Control cache scope is reused.
+
+The persisted job-event feed is retained as a recent history window, not an unbounded forever-log.
 
 ## Semantic search
 

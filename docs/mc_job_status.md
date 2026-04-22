@@ -17,6 +17,7 @@ mc_job_status({ jobId: "job_123" })
 ## What it returns
 
 - `job` — the current tracked job record
+- `job.pendingInput` — optional pending permission/question request details when the child is blocked
 - `result` — optional stable result snapshot if one exists
 
 Possible job states include:

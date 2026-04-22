@@ -1,23 +1,39 @@
 import { createHash } from "node:crypto"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import type { OpenCodeAdapter } from "./opencode-client.js"
-import { normalizeRelayMode } from "./config.js"
-import { deliverParentRelay } from "./relay.js"
-import { extractSessionID, extractSessionTimestamp, extractStatus } from "./session-extractors.js"
+import { deliverBlockedStateRelay, deliverParentRelay, deliverPendingInputRelay, deliverProgressRelay } from "./relay.js"
+import {
+  extractPermissionRequest,
+  extractQuestionRequest,
+  extractRequestID,
+  extractSessionID,
+  extractSessionTimestamp,
+  extractStatus,
+} from "./session-extractors.js"
 import type {
   BackgroundJob,
+  JobEventsResult,
   JobLifecycleEvent,
   JobListArgs,
+  JobPendingInput,
+  JobPendingPermissionRequest,
+  JobPendingQuestionRequest,
+  JobPermissionReplyArgs,
+  JobProgressUpdateArgs,
+  JobProgressUpdateResult,
+  JobQuestionReplyArgs,
   JobResultSnapshot,
   JobStartArgs,
   JobStatusResult,
   MissionControlJob,
+  MissionControlJobEvent,
   MissionControlJobResult,
   MissionControlConfig,
-  RelayMode,
+  PendingInputKind,
+  ToolCallerContext,
   ToolResult,
 } from "./types.js"
 import { fail, ok } from "./types.js"
@@ -30,7 +46,7 @@ interface JobStoreSnapshot {
 }
 
 export class MissionControlJobController {
-  private static readonly VERSION = 1
+  private static readonly VERSION = 2
 
   private rootDir: string
   private config: MissionControlConfig
@@ -40,6 +56,7 @@ export class MissionControlJobController {
   private readonly childSessionToJobID = new Map<string, string>()
   private launchReservations = 0
   private persistChain = Promise.resolve()
+  private lastLoadWarning: string | undefined
 
   constructor(rootDir: string, config: MissionControlConfig) {
     this.rootDir = rootDir
@@ -47,6 +64,7 @@ export class MissionControlJobController {
   }
 
   async start() {
+    this.lastLoadWarning = undefined
     const snapshot = await this.loadStore()
     if (!snapshot) {
       return
@@ -55,7 +73,7 @@ export class MissionControlJobController {
     for (const event of snapshot.events ?? []) {
       const existing = this.events.get(event.jobID) ?? []
       existing.push(event)
-      this.events.set(event.jobID, existing)
+      this.events.set(event.jobID, existing.slice(-this.maxPersistedJobEvents()))
     }
 
     let mutated = false
@@ -65,6 +83,7 @@ export class MissionControlJobController {
       if (isRecoverableJobState(job.state) || (job.state === "idle" && job.relayState !== "delivered")) {
         const previousState = job.state
         job.state = "orphaned"
+        job.pendingInput = undefined
         job.failureReason = "Mission Control restarted before the background job reached a terminal state."
         job.lastObservedEvent = "runtime.recovered"
         job.updatedAt = Date.now()
@@ -96,6 +115,21 @@ export class MissionControlJobController {
     this.config = config
   }
 
+  clearRecoveredState() {
+    this.jobs.clear()
+    this.results.clear()
+    this.events.clear()
+    this.childSessionToJobID.clear()
+    this.launchReservations = 0
+    this.persistChain = Promise.resolve()
+  }
+
+  consumeLoadWarning() {
+    const warning = this.lastLoadWarning
+    this.lastLoadWarning = undefined
+    return warning
+  }
+
   async createJob(
     args: JobStartArgs,
     parent: {
@@ -106,19 +140,17 @@ export class MissionControlJobController {
       consumeLaunchReservation?: boolean
     } = {},
   ): Promise<BackgroundJob> {
-    const relayMode = args.relay ?? this.config.jobs.autoRelayToParent
     const job: BackgroundJob = {
       jobID: createJobID(),
       parentSessionID: parent.sessionID,
       parentDirectory: parent.directory,
       title: args.title ?? "Mission Control job",
       prompt: args.prompt,
-      relayMode,
       state: "queued",
       createdAt: Date.now(),
       updatedAt: Date.now(),
       lastObservedEvent: "job.created",
-      relayState: relayMode === "manual" ? "not_requested" : "pending",
+      relayState: "pending",
     }
 
     this.jobs.set(job.jobID, job)
@@ -274,54 +306,143 @@ export class MissionControlJobController {
 
     switch (type) {
       case "permission.asked":
-        if (canLeaveIdle) {
+        const permissionRequest = await this.resolvePendingPermissionRequest(adapter, job, sessionID, payload)
+        if (permissionRequest && isResolvedPendingRequest(job, "permission", permissionRequest.requestId)) {
+          return
+        }
+        if (permissionRequest && hasConflictingPendingInput(job, permissionRequest)) {
+          return
+        }
+        const effectivePermissionRequest =
+          permissionRequest ?? (job.pendingInput?.kind === "permission" ? job.pendingInput : undefined)
+        const shouldNotifyPermission = permissionRequest ? !isSamePendingInput(job.pendingInput, permissionRequest) : false
+        if (canLeaveIdle && (effectivePermissionRequest || !job.pendingInput)) {
           job.state = "waiting_permission"
         }
+        if (permissionRequest) {
+          job.pendingInput = permissionRequest
+        }
         this.clearStaleSnapshot(job, previousState)
-        this.recordJobEvent(job, type, { previousState })
+        this.recordJobEvent(job, type, {
+          previousState,
+          detail: describePendingInput(effectivePermissionRequest) ?? "Waiting on permission approval.",
+          metadata: effectivePermissionRequest ? { pendingInput: effectivePermissionRequest } : undefined,
+        })
+        if (permissionRequest && shouldNotifyPermission) {
+          await this.safeDeliverPendingInputRelay(adapter, job, permissionRequest)
+        } else if (!effectivePermissionRequest && !job.pendingInput) {
+          await this.safeDeliverBlockedStateRelay(adapter, job, "permission")
+        }
         break
       case "permission.replied":
+        const permissionRequestID = extractRequestID(payload)
+        if (hasMismatchedPendingRequest(job, "permission", permissionRequestID)) {
+          return
+        }
+        if (permissionRequestID && isResolvedPendingRequest(job, "permission", permissionRequestID)) {
+          return
+        }
         if (canLeaveIdle) {
           job.state = "running"
         }
+        clearPendingInput(job, "permission", permissionRequestID)
+        if (permissionRequestID) {
+          job.lastResolvedPendingKind = "permission"
+          job.lastResolvedPendingRequestID = permissionRequestID
+        }
         this.clearStaleSnapshot(job, previousState)
-        this.recordJobEvent(job, type, { previousState })
+        this.recordJobEvent(job, type, {
+          previousState,
+          detail: "Permission request resolved.",
+          metadata: permissionRequestID ? { requestId: permissionRequestID } : undefined,
+        })
         break
       case "question.asked":
-        if (canLeaveIdle) {
+        const questionRequest = await this.resolvePendingQuestionRequest(adapter, job, sessionID, payload)
+        if (questionRequest && isResolvedPendingRequest(job, "question", questionRequest.requestId)) {
+          return
+        }
+        if (questionRequest && hasConflictingPendingInput(job, questionRequest)) {
+          return
+        }
+        const effectiveQuestionRequest =
+          questionRequest ?? (job.pendingInput?.kind === "question" ? job.pendingInput : undefined)
+        const shouldNotifyQuestion = questionRequest ? !isSamePendingInput(job.pendingInput, questionRequest) : false
+        if (canLeaveIdle && (effectiveQuestionRequest || !job.pendingInput)) {
           job.state = "waiting_question"
         }
+        if (questionRequest) {
+          job.pendingInput = questionRequest
+        }
         this.clearStaleSnapshot(job, previousState)
-        this.recordJobEvent(job, type, { previousState })
+        this.recordJobEvent(job, type, {
+          previousState,
+          detail: describePendingInput(effectiveQuestionRequest) ?? "Waiting on a question response.",
+          metadata: effectiveQuestionRequest ? { pendingInput: effectiveQuestionRequest } : undefined,
+        })
+        if (questionRequest && shouldNotifyQuestion) {
+          await this.safeDeliverPendingInputRelay(adapter, job, questionRequest)
+        } else if (!effectiveQuestionRequest && !job.pendingInput) {
+          await this.safeDeliverBlockedStateRelay(adapter, job, "question")
+        }
         break
       case "question.replied":
+        const questionRequestID = extractRequestID(payload)
+        if (hasMismatchedPendingRequest(job, "question", questionRequestID)) {
+          return
+        }
+        if (questionRequestID && isResolvedPendingRequest(job, "question", questionRequestID)) {
+          return
+        }
         if (canLeaveIdle) {
           job.state = "running"
         }
+        clearPendingInput(job, "question", questionRequestID)
+        if (questionRequestID) {
+          job.lastResolvedPendingKind = "question"
+          job.lastResolvedPendingRequestID = questionRequestID
+        }
         this.clearStaleSnapshot(job, previousState)
-        this.recordJobEvent(job, type, { previousState })
+        this.recordJobEvent(job, type, {
+          previousState,
+          detail: "Question request resolved.",
+          metadata: questionRequestID ? { requestId: questionRequestID } : undefined,
+        })
         break
       case "question.rejected":
+        const rejectedQuestionRequestID = extractRequestID(payload)
+        if (hasMismatchedPendingRequest(job, "question", rejectedQuestionRequestID)) {
+          return
+        }
+        if (rejectedQuestionRequestID && isResolvedPendingRequest(job, "question", rejectedQuestionRequestID)) {
+          return
+        }
+        clearPendingInput(job, "question", rejectedQuestionRequestID)
+        if (rejectedQuestionRequestID) {
+          job.lastResolvedPendingKind = "question"
+          job.lastResolvedPendingRequestID = rejectedQuestionRequestID
+        }
         job.state = "failed"
         job.failureReason = "Question rejected"
         job.completedAt = Date.now()
-        this.recordJobEvent(job, type, { previousState, detail: job.failureReason })
+        this.recordJobEvent(job, type, {
+          previousState,
+          detail: job.failureReason,
+          metadata: rejectedQuestionRequestID ? { requestId: rejectedQuestionRequestID } : undefined,
+        })
         await this.captureResult(adapter, job)
         this.closeJobTracking(job)
-        if (job.relayMode === "on_completion") {
-          await this.relayResult(adapter, job.jobID)
-        }
+        await this.relayResult(adapter, job.jobID)
         break
       case "session.error":
+        job.pendingInput = undefined
         job.state = "failed"
         job.failureReason = "Child session reported an error"
         job.completedAt = Date.now()
         this.recordJobEvent(job, type, { previousState, detail: job.failureReason })
         await this.captureResult(adapter, job)
         this.closeJobTracking(job)
-        if (job.relayMode === "on_completion") {
-          await this.relayResult(adapter, job.jobID)
-        }
+        await this.relayResult(adapter, job.jobID)
         break
       case "session.idle":
         if (hasFreshSourceTimestamp) {
@@ -337,9 +458,61 @@ export class MissionControlJobController {
           }
           break
         } else if (sessionStatus === "waiting_permission" && canLeaveIdle) {
-          job.state = "waiting_permission"
+          const currentPendingPermission = job.pendingInput?.kind === "permission" ? job.pendingInput : undefined
+          const pendingPermission = await this.resolvePendingPermissionRequest(adapter, job, sessionID, payload)
+          const resolvedPermissionReplay = Boolean(
+            pendingPermission && isResolvedPendingRequest(job, "permission", pendingPermission.requestId),
+          )
+          let effectivePendingPermission = currentPendingPermission
+          if (
+            pendingPermission &&
+            !resolvedPermissionReplay &&
+            !hasConflictingPendingInput(job, pendingPermission)
+          ) {
+            job.pendingInput = pendingPermission
+            effectivePendingPermission = pendingPermission
+            if (!isSamePendingInput(currentPendingPermission, pendingPermission)) {
+              await this.safeDeliverPendingInputRelay(adapter, job, pendingPermission)
+            }
+          }
+          if (effectivePendingPermission) {
+            job.state = "waiting_permission"
+          } else if (
+            !currentPendingPermission &&
+            !resolvedPermissionReplay &&
+            previousState !== "waiting_permission"
+          ) {
+            job.state = "waiting_permission"
+            await this.safeDeliverBlockedStateRelay(adapter, job, "permission")
+          }
         } else if (sessionStatus === "waiting_question" && canLeaveIdle) {
-          job.state = "waiting_question"
+          const currentPendingQuestion = job.pendingInput?.kind === "question" ? job.pendingInput : undefined
+          const pendingQuestion = await this.resolvePendingQuestionRequest(adapter, job, sessionID, payload)
+          const resolvedQuestionReplay = Boolean(
+            pendingQuestion && isResolvedPendingRequest(job, "question", pendingQuestion.requestId),
+          )
+          let effectivePendingQuestion = currentPendingQuestion
+          if (
+            pendingQuestion &&
+            !resolvedQuestionReplay &&
+            !hasConflictingPendingInput(job, pendingQuestion)
+          ) {
+            job.pendingInput = pendingQuestion
+            effectivePendingQuestion = pendingQuestion
+            if (!isSamePendingInput(currentPendingQuestion, pendingQuestion)) {
+              await this.safeDeliverPendingInputRelay(adapter, job, pendingQuestion)
+            }
+          }
+          if (effectivePendingQuestion) {
+            job.state = "waiting_question"
+          } else if (
+            !currentPendingQuestion &&
+            !resolvedQuestionReplay &&
+            previousState !== "waiting_question"
+          ) {
+            job.state = "waiting_question"
+            await this.safeDeliverBlockedStateRelay(adapter, job, "question")
+          }
         } else if (
           job.state !== "waiting_permission" &&
           job.state !== "waiting_question" &&
@@ -400,10 +573,301 @@ export class MissionControlJobController {
     })
   }
 
-  async cancelJob(adapter: OpenCodeAdapter, jobID: string) {
+  jobEvents(jobID: string, limit = 20): ToolResult<JobEventsResult> {
     const job = this.jobs.get(jobID)
     if (!job) {
       return fail("JobNotFound", `Job '${jobID}' was not found.`)
+    }
+
+    const boundedLimit = Math.max(1, Math.trunc(limit || 20))
+    const events = (this.events.get(jobID) ?? []).slice(-boundedLimit).reverse().map(toPublicJobEvent)
+
+    return ok({
+      jobId: jobID,
+      events,
+    })
+  }
+
+  async updateProgress(
+    adapter: OpenCodeAdapter,
+    args: JobProgressUpdateArgs,
+    caller: ToolCallerContext = {},
+  ): Promise<ToolResult<JobProgressUpdateResult>> {
+    const trimmedMessage = args.message.trim()
+    if (!trimmedMessage) {
+      return fail("JobLaunchFailed", "Progress updates require a non-blank message.")
+    }
+
+    const callerSessionID = caller.sessionId?.trim()
+    if (!callerSessionID) {
+      return fail(
+        "CurrentSessionUnavailable",
+        "Mission Control could not identify the caller child session for this progress update.",
+        "Call mc_job_update from the background child session or pass an explicit jobId from that child session.",
+      )
+    }
+
+    const job = args.jobId ? this.jobs.get(args.jobId) : this.jobForChildSession(callerSessionID)
+    if (!job) {
+      return fail("JobNotFound", `No tracked background job matches '${args.jobId ?? callerSessionID}'.`)
+    }
+
+    if (job.childSessionID !== callerSessionID) {
+      return fail(
+        "JobLaunchFailed",
+        `Job '${job.jobID}' only accepts progress updates from its tracked child session.`,
+        "Call mc_job_update from the active child session for this job.",
+      )
+    }
+
+    if (isClosedJobState(job.state)) {
+      return fail(
+        "JobLaunchFailed",
+        `Job '${job.jobID}' is already finalized and cannot accept more progress updates.`,
+        "Inspect the stored result instead of sending more progress updates.",
+      )
+    }
+
+    const previousState = job.state
+    if (
+      previousState === "idle" ||
+      ((previousState === "waiting_permission" || previousState === "waiting_question") && !job.pendingInput)
+    ) {
+      job.state = "running"
+      this.clearStaleSnapshot(job, previousState)
+    }
+
+    job.updatedAt = Date.now()
+    job.lastObservedEvent = "job.progress"
+    const event = this.recordJobEvent(job, "job.progress", {
+      previousState: previousState !== job.state ? previousState : undefined,
+      detail: trimmedMessage,
+      metadata: {
+        notifyParent: Boolean(args.notifyParent),
+      },
+    })
+
+    if (args.notifyParent) {
+      await this.safeDeliverProgressRelay(adapter, job, trimmedMessage)
+    }
+
+    try {
+      await this.persist()
+    } catch {
+      return ok({
+        job: toPublicJob(job),
+        event: toPublicJobEvent(event),
+      })
+    }
+
+    return ok({
+      job: toPublicJob(job),
+      event: toPublicJobEvent(event),
+    })
+  }
+
+  async replyPermission(adapter: OpenCodeAdapter, args: JobPermissionReplyArgs, caller: ToolCallerContext = {}) {
+    const job = this.jobs.get(args.jobId)
+    if (!job) {
+      return fail("JobNotFound", `Job '${args.jobId}' was not found.`)
+    }
+
+    const callerFailure = this.validateParentCaller(job, caller)
+    if (callerFailure) {
+      return callerFailure
+    }
+
+    const pendingInput = job.pendingInput
+    if (job.state !== "waiting_permission" || pendingInput?.kind !== "permission") {
+      return fail(
+        "JobBlockedOnPermission",
+        `Job '${job.jobID}' is not currently waiting on a permission request.`,
+        "Inspect mc_job_status to confirm the current blocked input before replying.",
+      )
+    }
+
+    if (!adapter.supportsPermissionReply()) {
+      return fail(
+        "JobBlockedOnPermission",
+        `The current OpenCode runtime cannot reply to permission requests for job '${job.jobID}'.`,
+      )
+    }
+
+    try {
+      await adapter.replyPermissionRequest(
+        pendingInput.requestId,
+        args.reply,
+        args.message,
+        job.childDirectory ?? job.parentDirectory,
+      )
+    } catch (error) {
+      return fail(
+        "JobBlockedOnPermission",
+        `Failed to reply to the permission request for job '${job.jobID}'.`,
+        error instanceof Error ? error.message : undefined,
+      )
+    }
+
+    const previousState = job.state
+    job.state = "running"
+    job.pendingInput = undefined
+    job.lastResolvedPendingKind = "permission"
+    job.lastResolvedPendingRequestID = pendingInput.requestId
+    job.updatedAt = Date.now()
+    job.lastObservedEvent = "permission.replied"
+    this.recordJobEvent(job, "permission.replied", {
+      previousState,
+      detail: `Parent replied '${args.reply}' to the permission request.`,
+      metadata: {
+        requestId: pendingInput.requestId,
+        reply: args.reply,
+        ...(args.message ? { message: args.message } : {}),
+      },
+    })
+    try {
+      await this.persist()
+    } catch {
+      return ok(toPublicJob(job))
+    }
+    return ok(toPublicJob(job))
+  }
+
+  async replyQuestion(adapter: OpenCodeAdapter, args: JobQuestionReplyArgs, caller: ToolCallerContext = {}) {
+    const job = this.jobs.get(args.jobId)
+    if (!job) {
+      return fail("JobNotFound", `Job '${args.jobId}' was not found.`)
+    }
+
+    const callerFailure = this.validateParentCaller(job, caller)
+    if (callerFailure) {
+      return callerFailure
+    }
+
+    const pendingInput = job.pendingInput
+    if (job.state !== "waiting_question" || pendingInput?.kind !== "question") {
+      return fail(
+        "JobBlockedOnQuestion",
+        `Job '${job.jobID}' is not currently waiting on a question response.`,
+        "Inspect mc_job_status to confirm the current blocked input before replying.",
+      )
+    }
+
+    if (!adapter.supportsQuestionReply()) {
+      return fail(
+        "JobBlockedOnQuestion",
+        `The current OpenCode runtime cannot reply to question requests for job '${job.jobID}'.`,
+      )
+    }
+
+    try {
+      await adapter.replyQuestionRequest(pendingInput.requestId, args.answers, job.childDirectory ?? job.parentDirectory)
+    } catch (error) {
+      return fail(
+        "JobBlockedOnQuestion",
+        `Failed to reply to the question request for job '${job.jobID}'.`,
+        error instanceof Error ? error.message : undefined,
+      )
+    }
+
+    const previousState = job.state
+    job.state = "running"
+    job.pendingInput = undefined
+    job.lastResolvedPendingKind = "question"
+    job.lastResolvedPendingRequestID = pendingInput.requestId
+    job.updatedAt = Date.now()
+    job.lastObservedEvent = "question.replied"
+    this.recordJobEvent(job, "question.replied", {
+      previousState,
+      detail: "Parent answered the pending question.",
+      metadata: {
+        requestId: pendingInput.requestId,
+        answers: args.answers,
+      },
+    })
+    try {
+      await this.persist()
+    } catch {
+      return ok(toPublicJob(job))
+    }
+    return ok(toPublicJob(job))
+  }
+
+  async rejectQuestion(adapter: OpenCodeAdapter, jobID: string, caller: ToolCallerContext = {}) {
+    const job = this.jobs.get(jobID)
+    if (!job) {
+      return fail("JobNotFound", `Job '${jobID}' was not found.`)
+    }
+
+    const callerFailure = this.validateParentCaller(job, caller)
+    if (callerFailure) {
+      return callerFailure
+    }
+
+    const pendingInput = job.pendingInput
+    if (job.state !== "waiting_question" || pendingInput?.kind !== "question") {
+      return fail(
+        "JobBlockedOnQuestion",
+        `Job '${job.jobID}' is not currently waiting on a question response.`,
+        "Inspect mc_job_status to confirm the current blocked input before rejecting it.",
+      )
+    }
+
+    if (!adapter.supportsQuestionReject()) {
+      return fail(
+        "JobBlockedOnQuestion",
+        `The current OpenCode runtime cannot reject question requests for job '${job.jobID}'.`,
+      )
+    }
+
+    try {
+      await adapter.rejectQuestionRequest(pendingInput.requestId, job.childDirectory ?? job.parentDirectory)
+    } catch (error) {
+      return fail(
+        "JobBlockedOnQuestion",
+        `Failed to reject the question request for job '${job.jobID}'.`,
+        error instanceof Error ? error.message : undefined,
+      )
+    }
+
+    const previousState = job.state
+    job.pendingInput = undefined
+    job.lastResolvedPendingKind = "question"
+    job.lastResolvedPendingRequestID = pendingInput.requestId
+    job.state = "failed"
+    job.failureReason = "Question rejected"
+    job.updatedAt = Date.now()
+    job.completedAt = Date.now()
+    job.lastObservedEvent = "question.rejected"
+    this.recordJobEvent(job, "question.rejected", {
+      previousState,
+      detail: job.failureReason,
+      metadata: {
+        requestId: pendingInput.requestId,
+      },
+    })
+    try {
+      await this.captureResult(adapter, job)
+      this.closeJobTracking(job)
+      const relayResult = await this.relayResult(adapter, job.jobID)
+      if (!relayResult.ok) {
+        return ok(toPublicJob(job))
+      }
+      await this.persist()
+    } catch {
+      return ok(toPublicJob(job))
+    }
+    return ok(toPublicJob(job))
+  }
+
+  async cancelJob(adapter: OpenCodeAdapter, jobID: string, caller: ToolCallerContext = {}) {
+    const job = this.jobs.get(jobID)
+    if (!job) {
+      return fail("JobNotFound", `Job '${jobID}' was not found.`)
+    }
+
+    const callerFailure = this.validateParentCaller(job, caller)
+    if (callerFailure) {
+      return callerFailure
     }
 
     if (isClosedJobState(job.state)) {
@@ -415,10 +879,19 @@ export class MissionControlJobController {
     }
 
     if (job.childSessionID) {
-      await adapter.abortSession(job.childSessionID, job.childDirectory)
+      try {
+        await adapter.abortSession(job.childSessionID, job.childDirectory)
+      } catch (error) {
+        return fail(
+          "JobLaunchFailed",
+          `Failed to abort child session '${job.childSessionID}' for job '${jobID}'.`,
+          error instanceof Error ? error.message : undefined,
+        )
+      }
     }
 
     const previousState = job.state
+    job.pendingInput = undefined
     job.state = "aborted"
     job.updatedAt = Date.now()
     job.completedAt = Date.now()
@@ -435,15 +908,20 @@ export class MissionControlJobController {
       keyMessageIDs: [],
       observedAt: Date.now(),
     })
-    this.closeJobTracking(job)
-    if (job.relayMode === "on_completion") {
-      await this.relayResult(adapter, jobID)
+    try {
+      this.closeJobTracking(job)
+      const relayResult = await this.relayResult(adapter, jobID)
+      if (!relayResult.ok) {
+        return ok(toPublicJob(job))
+      }
+      await this.persist()
+    } catch {
+      return ok(toPublicJob(job))
     }
-    await this.persist()
     return ok(toPublicJob(job))
   }
 
-  async getResult(adapter: OpenCodeAdapter, jobID: string, sendToParent: boolean) {
+  async getResult(adapter: OpenCodeAdapter, jobID: string, sendToParent: boolean, caller: ToolCallerContext = {}) {
     const job = this.jobs.get(jobID)
     if (!job) {
       return fail("JobNotFound", `Job '${jobID}' was not found.`)
@@ -471,6 +949,16 @@ export class MissionControlJobController {
     }
 
     if (sendToParent) {
+      if (!adapter.supportsResultRelay()) {
+        return fail(
+          "JobLaunchFailed",
+          `The current OpenCode runtime cannot relay job '${jobID}' results back to the parent session.`,
+        )
+      }
+      const callerFailure = this.validateParentCaller(job, caller)
+      if (callerFailure) {
+        return callerFailure
+      }
       const relayResult = await this.relayResult(adapter, jobID, { force: true })
       if (!relayResult.ok) {
         return relayResult
@@ -502,7 +990,7 @@ export class MissionControlJobController {
       )
     }
 
-    if (!isStableResultState(job.state)) {
+    if (!isStableResultState(job.state) && job.state !== "orphaned") {
       return fail(
         "JobLaunchFailed",
         `Job '${jobID}' is not in a stable state for relay yet.`,
@@ -553,8 +1041,74 @@ export class MissionControlJobController {
       return fail(
         "JobLaunchFailed",
         `Failed to relay the result for job '${jobID}' to its parent session.`,
-        "Inspect the parent session and retry relay manually.",
+        "Inspect the parent session and re-send the stored result with mc_job_result({ jobId, sendToParent: true }).",
       )
+    }
+  }
+
+  private jobForChildSession(sessionID: string) {
+    const jobID = this.childSessionToJobID.get(sessionID)
+    return jobID ? this.jobs.get(jobID) : undefined
+  }
+
+  private validateParentCaller(job: BackgroundJob, caller: ToolCallerContext) {
+    const callerSessionID = caller.sessionId?.trim()
+    if (!callerSessionID) {
+      return fail(
+        "CurrentSessionUnavailable",
+        `Mission Control could not verify the parent session for job '${job.jobID}'.`,
+        "Run this reply tool from the parent session that launched the background job.",
+      )
+    }
+
+    if (callerSessionID !== job.parentSessionID) {
+      return fail(
+        "JobLaunchFailed",
+        `Only parent session '${job.parentSessionID}' can perform parent-scoped actions for job '${job.jobID}'.`,
+        "Switch back to the parent session that launched the job and retry.",
+      )
+    }
+
+    return undefined
+  }
+
+  private async resolvePendingPermissionRequest(
+    adapter: OpenCodeAdapter,
+    job: BackgroundJob,
+    sessionID: string,
+    payload: unknown,
+  ) {
+    const direct = toPendingPermissionRequest(payload)
+    if (direct) {
+      return direct
+    }
+
+    try {
+      const pending = await adapter.listPendingPermissions(job.childDirectory ?? job.parentDirectory)
+      const matched = [...pending].reverse().find((request) => extractSessionID(request) === sessionID)
+      return toPendingPermissionRequest(matched)
+    } catch {
+      return undefined
+    }
+  }
+
+  private async resolvePendingQuestionRequest(
+    adapter: OpenCodeAdapter,
+    job: BackgroundJob,
+    sessionID: string,
+    payload: unknown,
+  ) {
+    const direct = toPendingQuestionRequest(payload)
+    if (direct) {
+      return direct
+    }
+
+    try {
+      const pending = await adapter.listPendingQuestions(job.childDirectory ?? job.parentDirectory)
+      const matched = [...pending].reverse().find((request) => extractSessionID(request) === sessionID)
+      return toPendingQuestionRequest(matched)
+    } catch {
+      return undefined
     }
   }
 
@@ -637,12 +1191,17 @@ export class MissionControlJobController {
       const content = await readFile(this.getStorePath(), "utf8")
       const snapshot = JSON.parse(content) as JobStoreSnapshot
       if (snapshot.version !== MissionControlJobController.VERSION) {
+        this.lastLoadWarning = `Ignoring persisted jobs store version ${snapshot.version}; Mission Control now expects version ${MissionControlJobController.VERSION}.`
         return undefined
       }
 
       return snapshot
-    } catch {
-      return undefined
+    } catch (error: any) {
+      if (error?.code === "ENOENT") {
+        return undefined
+      }
+
+      throw error
     }
   }
 
@@ -656,8 +1215,10 @@ export class MissionControlJobController {
       }
 
       const storePath = this.getStorePath()
+      const tempStorePath = `${storePath}.tmp`
       await mkdir(dirname(storePath), { recursive: true })
-      await writeFile(storePath, JSON.stringify(snapshot, null, 2), "utf8")
+      await writeFile(tempStorePath, JSON.stringify(snapshot, null, 2), "utf8")
+      await rename(tempStorePath, storePath)
     }
 
     this.persistChain = this.persistChain.then(writeSnapshot, writeSnapshot)
@@ -673,6 +1234,7 @@ export class MissionControlJobController {
   private markCompleted(job: BackgroundJob) {
     job.state = "completed"
     job.completedAt = Date.now()
+    job.pendingInput = undefined
   }
 
   private updateSnapshotState(jobID: string, state: JobResultSnapshot["state"]) {
@@ -694,25 +1256,61 @@ export class MissionControlJobController {
     job.state = "idle"
     this.recordJobEvent(job, eventType, { previousState })
 
-    if (job.relayMode === "manual") {
-      const previousIdleState = job.state
-      this.markCompleted(job)
-      await this.captureResult(adapter, job)
-      this.recordJobEvent(job, "job.completed", { previousState: previousIdleState })
-      this.closeJobTracking(job)
-      return
-    }
-
     await this.captureResult(adapter, job)
-
-    if (job.relayMode === "on_idle" || job.relayMode === "on_completion") {
-      await this.relayResult(adapter, job.jobID)
-    }
+    await this.relayResult(adapter, job.jobID)
   }
 
   private clearStaleSnapshot(job: BackgroundJob, previousState: BackgroundJob["state"]) {
     if (isStableResultState(previousState) && !isStableResultState(job.state)) {
       this.results.delete(job.jobID)
+    }
+  }
+
+  private async safeDeliverPendingInputRelay(
+    adapter: OpenCodeAdapter,
+    job: BackgroundJob,
+    pendingInput: JobPendingInput,
+  ) {
+    try {
+      await deliverPendingInputRelay(adapter, job, pendingInput)
+    } catch (error) {
+      this.recordJobEvent(job, "job.pending_input_notification_failed", {
+        detail: error instanceof Error ? error.message : "Failed to notify the parent session about a blocked request.",
+        metadata: {
+          kind: pendingInput.kind,
+          requestId: pendingInput.requestId,
+        },
+      })
+    }
+  }
+
+  private async safeDeliverBlockedStateRelay(
+    adapter: OpenCodeAdapter,
+    job: BackgroundJob,
+    kind: "permission" | "question",
+  ) {
+    try {
+      await deliverBlockedStateRelay(adapter, job, kind)
+    } catch (error) {
+      this.recordJobEvent(job, "job.blocked_state_notification_failed", {
+        detail: error instanceof Error ? error.message : "Failed to notify the parent session about a blocked job.",
+        metadata: {
+          kind,
+        },
+      })
+    }
+  }
+
+  private async safeDeliverProgressRelay(adapter: OpenCodeAdapter, job: BackgroundJob, message: string) {
+    try {
+      await deliverProgressRelay(adapter, job, message)
+    } catch (error) {
+      this.recordJobEvent(job, "job.progress_notification_failed", {
+        detail: error instanceof Error ? error.message : "Failed to notify the parent session about job progress.",
+        metadata: {
+          message,
+        },
+      })
     }
   }
 
@@ -722,8 +1320,9 @@ export class MissionControlJobController {
     options: {
       previousState?: BackgroundJob["state"]
       detail?: string
+      metadata?: Record<string, unknown>
     } = {},
-  ) {
+  ): JobLifecycleEvent {
     const event: JobLifecycleEvent = {
       eventID: createJobEventID(job.jobID),
       jobID: job.jobID,
@@ -734,11 +1333,18 @@ export class MissionControlJobController {
       previousState: options.previousState,
       at: Date.now(),
       detail: options.detail,
+      metadata: options.metadata,
     }
 
     const events = this.events.get(job.jobID) ?? []
     events.push(event)
-    this.events.set(job.jobID, events)
+    const retainedEvents = events.slice(-this.maxPersistedJobEvents())
+    this.events.set(job.jobID, retainedEvents)
+    return event
+  }
+
+  private maxPersistedJobEvents() {
+    return Math.max(50, Math.trunc(this.config.observe.eventBufferSize || 0))
   }
 }
 
@@ -808,9 +1414,13 @@ const defaultSummaryForState = (job: BackgroundJob) => {
 
   switch (job.state) {
     case "waiting_permission":
-      return "The child session is waiting on a permission decision."
+      return job.pendingInput?.kind === "permission"
+        ? `The child session is waiting on a permission decision for '${job.pendingInput.permission}'.`
+        : "The child session is waiting on a permission decision."
     case "waiting_question":
-      return "The child session is waiting on an answered question."
+      return job.pendingInput?.kind === "question" && job.pendingInput.questions[0]
+        ? `The child session is waiting on an answer for '${job.pendingInput.questions[0].header}'.`
+        : "The child session is waiting on an answered question."
     case "aborted":
       return "The job was aborted before completion."
     default:
@@ -822,11 +1432,19 @@ const collectBlockers = (job: BackgroundJob) => {
   const blockers: string[] = []
 
   if (job.state === "waiting_permission") {
-    blockers.push("Waiting on permission approval")
+    blockers.push(
+      job.pendingInput?.kind === "permission"
+        ? `Waiting on permission approval for '${job.pendingInput.permission}'`
+        : "Waiting on permission approval",
+    )
   }
 
   if (job.state === "waiting_question") {
-    blockers.push("Waiting on a question response")
+    blockers.push(
+      job.pendingInput?.kind === "question" && job.pendingInput.questions[0]
+        ? `Waiting on question response for '${job.pendingInput.questions[0].header}'`
+        : "Waiting on a question response",
+    )
   }
 
   if (job.failureReason) {
@@ -840,13 +1458,14 @@ const mergeBlockers = (job: BackgroundJob, reportedBlockers: string[]) => {
   return Array.from(new Set([...collectBlockers(job), ...reportedBlockers]))
 }
 
-const normalizeLoadedJob = (job: BackgroundJob, config: MissionControlConfig): BackgroundJob => {
-  const relayMode = normalizeRelayMode(job.relayMode, config.jobs.autoRelayToParent)
+const normalizeLoadedJob = (job: BackgroundJob, _config: MissionControlConfig): BackgroundJob => {
   return {
     ...job,
-    relayMode,
-    relayState: job.relayState ?? (relayMode === "manual" ? "not_requested" : "pending"),
+    relayState: (job.relayState as string) === "not_requested" ? "pending" : (job.relayState ?? "pending"),
     lastSourceUpdatedAt: job.lastSourceUpdatedAt,
+    pendingInput: job.pendingInput,
+    lastResolvedPendingKind: job.lastResolvedPendingKind,
+    lastResolvedPendingRequestID: job.lastResolvedPendingRequestID,
   }
 }
 
@@ -858,7 +1477,6 @@ const toPublicJob = (job: BackgroundJob): MissionControlJob => ({
   childDirectory: job.childDirectory,
   title: job.title,
   prompt: job.prompt,
-  relay: job.relayMode,
   state: job.state,
   createdAt: job.createdAt,
   updatedAt: job.updatedAt,
@@ -868,6 +1486,7 @@ const toPublicJob = (job: BackgroundJob): MissionControlJob => ({
   lastObservedEvent: job.lastObservedEvent,
   lastSourceUpdatedAt: job.lastSourceUpdatedAt,
   relayState: job.relayState,
+  pendingInput: job.pendingInput,
 })
 
 const toPublicJobResult = (result: JobResultSnapshot | undefined): MissionControlJobResult | undefined =>
@@ -884,6 +1503,91 @@ const toPublicJobResult = (result: JobResultSnapshot | undefined): MissionContro
         observedAt: result.observedAt,
       }
     : undefined
+
+const toPublicJobEvent = (event: JobLifecycleEvent): MissionControlJobEvent => ({
+  eventId: event.eventID,
+  jobId: event.jobID,
+  sessionId: event.parentSessionID,
+  childSessionId: event.childSessionID,
+  type: event.type,
+  state: event.state,
+  previousState: event.previousState,
+  at: event.at,
+  detail: event.detail,
+  metadata: event.metadata,
+})
+
+const toPendingPermissionRequest = (value: unknown): JobPendingPermissionRequest | undefined => {
+  const request = extractPermissionRequest(value)
+  if (!request) {
+    return undefined
+  }
+
+  return {
+    kind: "permission",
+    ...request,
+    askedAt: Date.now(),
+  }
+}
+
+const toPendingQuestionRequest = (value: unknown): JobPendingQuestionRequest | undefined => {
+  const request = extractQuestionRequest(value)
+  if (!request) {
+    return undefined
+  }
+
+  return {
+    kind: "question",
+    ...request,
+    askedAt: Date.now(),
+  }
+}
+
+const isSamePendingInput = (left: JobPendingInput | undefined, right: JobPendingInput | undefined) =>
+  Boolean(left && right && left.kind === right.kind && left.requestId === right.requestId)
+
+const clearPendingInput = (job: BackgroundJob, kind: PendingInputKind, requestID?: string) => {
+  if (!job.pendingInput || job.pendingInput.kind !== kind) {
+    return
+  }
+
+  if (requestID && job.pendingInput.requestId !== requestID) {
+    return
+  }
+
+  job.pendingInput = undefined
+}
+
+const isResolvedPendingRequest = (job: BackgroundJob, kind: PendingInputKind, requestID: string) =>
+  !job.pendingInput && job.lastResolvedPendingKind === kind && job.lastResolvedPendingRequestID === requestID
+
+const hasMismatchedPendingRequest = (job: BackgroundJob, kind: PendingInputKind, requestID?: string) => {
+  if (!job.pendingInput) {
+    return false
+  }
+
+  if (job.pendingInput.kind !== kind) {
+    return true
+  }
+
+  return Boolean(requestID && job.pendingInput.requestId !== requestID)
+}
+
+const hasConflictingPendingInput = (job: BackgroundJob, pendingInput: JobPendingInput) =>
+  Boolean(job.pendingInput && job.pendingInput.requestId !== pendingInput.requestId)
+
+const describePendingInput = (pendingInput: JobPendingInput | undefined) => {
+  if (!pendingInput) {
+    return undefined
+  }
+
+  if (pendingInput.kind === "permission") {
+    return `Waiting on permission '${pendingInput.permission}'.`
+  }
+
+  const firstQuestion = pendingInput.questions[0]?.header || pendingInput.questions[0]?.question
+  return firstQuestion ? `Waiting on question '${firstQuestion}'.` : "Waiting on a question response."
+}
 
 const parseStructuredFinalReport = (text: string) => {
   const sections: Record<string, string[]> = {}

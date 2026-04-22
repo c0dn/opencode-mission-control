@@ -12,9 +12,10 @@ ${job.prompt}
 Rules:
 1. Work autonomously until you complete the task or become blocked.
 2. If blocked by missing information, permissions, or a question, state the blocker clearly.
-3. Keep the final report concise and grounded in what you actually verified.
-4. Stop once you have either completed the task, reached a clear blocker, or need parent-session guidance to proceed.
-5. End with a short final report using these headings:
+3. For long-running work, you may call mc_job_update({ message, notifyParent? }) from this child session to publish progress checkpoints.
+4. Keep the final report concise and grounded in what you actually verified.
+5. Stop once you have either completed the task, reached a clear blocker, or need parent-session guidance to proceed.
+6. End with a short final report using these headings:
    - Status
    - Summary
    - Key Findings

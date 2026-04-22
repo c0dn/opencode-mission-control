@@ -2,7 +2,6 @@ import type {
   DeepPartial,
   MissionControlConfig,
   MissionControlPluginOptions,
-  RelayMode,
   MissionControlRuntimeSecrets,
 } from "./types.js"
 
@@ -30,7 +29,6 @@ export const DEFAULT_CONFIG: MissionControlConfig = {
     maxConcurrent: 2,
     autoAttachToCurrentSession: true,
     allowLatestSessionFallback: false,
-    autoRelayToParent: "manual",
     titlePrefix: "Mission Control",
     keepChildSessionOnCompletion: true,
   },
@@ -43,29 +41,30 @@ export const DEFAULT_CONFIG: MissionControlConfig = {
 
 export const createMissionControlConfig = (
   overrides: DeepPartial<MissionControlConfig> = {},
-): MissionControlConfig => ({
-  search: {
-    ...DEFAULT_CONFIG.search,
-    ...overrides.search,
-  },
-  observe: {
-    ...DEFAULT_CONFIG.observe,
-    ...overrides.observe,
-  },
-  jobs: {
-    ...DEFAULT_CONFIG.jobs,
-    ...overrides.jobs,
-    autoAttachToCurrentSession: true,
-    autoRelayToParent: normalizeRelayMode(overrides.jobs?.autoRelayToParent, DEFAULT_CONFIG.jobs.autoRelayToParent),
-  },
-  safety: {
-    ...DEFAULT_CONFIG.safety,
-    ...overrides.safety,
-    requireExplicitParentOnAmbiguousAttach: true,
-    autoApprovePermissions: false,
-    autoAnswerQuestions: false,
-  },
-})
+): MissionControlConfig => {
+  return {
+    search: {
+      ...DEFAULT_CONFIG.search,
+      ...overrides.search,
+    },
+    observe: {
+      ...DEFAULT_CONFIG.observe,
+      ...overrides.observe,
+    },
+    jobs: {
+      ...DEFAULT_CONFIG.jobs,
+      ...overrides.jobs,
+      autoAttachToCurrentSession: true,
+    },
+    safety: {
+      ...DEFAULT_CONFIG.safety,
+      ...overrides.safety,
+      requireExplicitParentOnAmbiguousAttach: true,
+      autoApprovePermissions: false,
+      autoAnswerQuestions: false,
+    },
+  }
+}
 
 export const clampResultLimit = (
   requested: number | undefined,
@@ -116,15 +115,4 @@ export const resolveMissionControlRuntime = (
 const normalizeString = (value: string | undefined) => {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
-}
-
-export const normalizeRelayMode = (
-  value: string | undefined,
-  fallback: RelayMode = DEFAULT_CONFIG.jobs.autoRelayToParent,
-): RelayMode => {
-  if (value === "on_idle" || value === "on_completion" || value === "manual") {
-    return value
-  }
-
-  return fallback
 }
