@@ -61,7 +61,9 @@ describe("MissionControl background jobs finalization and cancellation", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Finalize then refuse cancel",
       prompt: "Finish and become idle.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -108,7 +110,9 @@ describe("MissionControl background jobs finalization and cancellation", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Abort me",
       prompt: "Start and wait.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -161,7 +165,9 @@ describe("MissionControl background jobs finalization and cancellation", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Fallback finalize",
       prompt: "Trigger idle finalization even if transcript capture fails.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -180,6 +186,76 @@ describe("MissionControl background jobs finalization and cancellation", () => {
     expect(result.data.summary).toContain("Transcript capture failed")
   })
 
+  test("captures tool output when the final child message is a completed tool part", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-tool-output", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages() {
+          return [
+            {
+              info: {
+                id: "tool-output-message",
+                role: "assistant",
+                time: { created: 10 },
+              },
+              parts: [
+                {
+                  id: "tool-output-part",
+                  type: "tool",
+                  tool: "bash",
+                  state: {
+                    status: "completed",
+                    output: "probe command finished successfully",
+                  },
+                },
+              ],
+            },
+          ]
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig()
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Tool output finalize",
+      prompt: "Finish on a tool output.",
+    }, {
+      sessionId: "parent-session",
+      directory,
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "session.idle", { sessionID: "child-tool-output" })
+
+    const result = await controller.getResult(adapter, launchResult.data.jobId, false)
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected tool-output result to exist")
+    }
+
+    expect(result.data.summary).toContain("probe command finished successfully")
+  })
+
   test("parses structured final reports and relays the recommended next step", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
@@ -191,7 +267,11 @@ describe("MissionControl background jobs finalization and cancellation", () => {
         async create() {
           return { id: "child-structured-relay", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+          if (input.body?.noReply) {
+            relayedText = input.body.parts?.[0]?.text ?? ""
+          }
+
           return undefined
         },
         async messages() {
@@ -220,10 +300,6 @@ Recommended Next Step: Run the full verification suite before merging.`,
         async abort() {
           return true
         },
-        async prompt({ body }: { body: { parts?: Array<{ text?: string }> } }) {
-          relayedText = body.parts?.[0]?.text ?? ""
-          return undefined
-        },
       },
     })
 
@@ -235,7 +311,9 @@ Recommended Next Step: Run the full verification suite before merging.`,
     const launchResult = await launcher.launch(adapter, {
       title: "Structured relay",
       prompt: "Finish with the required report headings.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -298,7 +376,9 @@ Recommended Next Step: Run the full verification suite before merging.`,
     const launchResult = await launcher.launch(adapter, {
       title: "Persist events",
       prompt: "Exercise the lifecycle log.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)

@@ -18,7 +18,7 @@ Detailed behavior and caveats live under `docs/`.
 - [`mc_session_tree({ sessionId, depth? })`](docs/mc_session_tree.md) — inspect a session’s parent/child tree
 - [`mc_session_events({ sessionId, withChildren?, limit? })`](docs/mc_session_events.md) — view recent live events and current status
 - [`mc_session_search({ query, sessionId?, scope?, exact?, limit? })`](docs/mc_session_search.md) — search indexed session content; `scope: "global"` widens discovery and `exact: true` forces lexical matching
-- [`mc_job_start({ prompt, sessionId?, title? })`](docs/mc_job_start.md) — launch an attached background child-session job
+- [`mc_job_start({ prompt, title? })`](docs/mc_job_start.md) — launch an attached background child-session job for the current session
 - [`mc_job_status({ jobId })`](docs/mc_job_status.md) — inspect one tracked job and its latest stable result if available
 - [`mc_job_events({ jobId, limit? })`](docs/mc_job_events.md) — inspect the persisted event feed for a job, including lifecycle changes and child progress updates
 - [`mc_job_list({ sessionId?, state?, limit? })`](docs/mc_job_list.md) — list tracked jobs with optional filters
@@ -37,7 +37,7 @@ Detailed behavior and caveats live under `docs/`.
 mc_session_search({ query: "retry logic", limit: 5 })
 
 mc_session_search({
-  query: "AmbiguousParentSession",
+  query: "ParentSessionScopeUnavailable",
   scope: "global",
   exact: true,
   limit: 10,
@@ -66,7 +66,6 @@ mc_job_start({
 })
 
 mc_job_start({
-  sessionId: "ses_123",
   title: "Search audit",
   prompt: "Find mentions of global scope behavior.",
 })

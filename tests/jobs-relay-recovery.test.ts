@@ -50,7 +50,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Run analysis",
       prompt: "Do work in the background.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -77,10 +79,19 @@ describe("MissionControl background jobs relay and recovery", () => {
     const adapter = new OpenCodeAdapter({
       session: {
         ...parentSessionHandlers(directory),
+        async list() {
+          return [
+            { id: "stale-session", directory, time: { created: 1, updated: 10 } },
+            { id: "parent-session", directory, time: { created: 2, updated: 20 } },
+          ]
+        },
         async create() {
           return { id: "child-manual-relay" }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            relayCount += 1
+          }
           return undefined
         },
         async messages() {
@@ -99,14 +110,18 @@ describe("MissionControl background jobs relay and recovery", () => {
                 },
               ],
             },
+            {
+              info: {
+                id: "message-1",
+                role: "assistant",
+                time: { created: 11 },
+              },
+              parts: [],
+            },
           ]
         },
         async abort() {
           return true
-        },
-        async prompt() {
-          relayCount += 1
-          return undefined
         },
       },
     })
@@ -119,7 +134,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Re-deliver result",
       prompt: "Finish and allow a later explicit re-send.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -129,7 +146,11 @@ describe("MissionControl background jobs relay and recovery", () => {
 
     await controller.handleEvent(adapter, "session.idle", { sessionID: "child-manual-relay" })
 
-    const relayResult = await controller.getResult(adapter, launchResult.data.jobId, true, { sessionId: "parent-session" })
+    const relayResult = await controller.getResult(adapter, launchResult.data.jobId, true, {
+      sessionId: "stale-session",
+      messageId: "message-1",
+      directory,
+    })
 
     expect(relayResult.ok).toBe(true)
     expect(relayCount).toBe(2)
@@ -146,7 +167,11 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-relay-fail", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            relayAttempts += 1
+            throw new Error("relay failed")
+          }
           return undefined
         },
         async messages() {
@@ -170,10 +195,6 @@ describe("MissionControl background jobs relay and recovery", () => {
         async abort() {
           return true
         },
-        async prompt() {
-          relayAttempts += 1
-          throw new Error("relay failed")
-        },
       },
     })
 
@@ -185,7 +206,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Relay failure job",
       prompt: "Finish even if relay fails.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -220,7 +243,10 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-restart-idle", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            throw new Error("relay failed")
+          }
           return undefined
         },
         async messages() {
@@ -234,9 +260,6 @@ describe("MissionControl background jobs relay and recovery", () => {
         async abort() {
           return true
         },
-        async prompt() {
-          throw new Error("relay failed")
-        },
       },
     })
 
@@ -248,7 +271,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Restart idle orphan",
       prompt: "Leave this job idle with a failed relay.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -284,7 +309,10 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-orphan-resend", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            throw new Error("relay failed before restart")
+          }
           return undefined
         },
         async messages() {
@@ -298,9 +326,6 @@ describe("MissionControl background jobs relay and recovery", () => {
         async abort() {
           return true
         },
-        async prompt() {
-          throw new Error("relay failed before restart")
-        },
       },
     })
 
@@ -312,7 +337,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(initialAdapter, {
       title: "Orphan resend",
       prompt: "Allow a later explicit re-send after restart.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -326,7 +353,12 @@ describe("MissionControl background jobs relay and recovery", () => {
     const resendAdapter = new OpenCodeAdapter({
       session: {
         ...parentSessionHandlers(directory),
-        async prompt({ body }: { body: { parts?: Array<{ text?: string }> } }) {
+        async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+          if (!input.body?.noReply) {
+            return undefined
+          }
+
+          const body = input.body
           relayedText = body.parts?.[0]?.text ?? ""
           return true
         },
@@ -365,12 +397,11 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-resend-scope", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            relayCalls += 1
+          }
           return undefined
-        },
-        async prompt() {
-          relayCalls += 1
-          return true
         },
         async messages() {
           return [
@@ -394,7 +425,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Resend scope",
       prompt: "Finish and protect the resend path.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -419,7 +452,10 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-resume-after-idle", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            throw new Error("relay failed")
+          }
           return undefined
         },
         async messages() {
@@ -433,9 +469,6 @@ describe("MissionControl background jobs relay and recovery", () => {
         async abort() {
           return true
         },
-        async prompt() {
-          throw new Error("relay failed")
-        },
       },
     })
 
@@ -447,7 +480,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Resume after idle",
       prompt: "Pause, then continue if more work appears.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -499,7 +534,10 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-stale-status", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            throw new Error("relay failed")
+          }
           return undefined
         },
         async messages() {
@@ -513,9 +551,6 @@ describe("MissionControl background jobs relay and recovery", () => {
         async abort() {
           return true
         },
-        async prompt() {
-          throw new Error("relay failed")
-        },
       },
     })
 
@@ -527,7 +562,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Ignore stale status",
       prompt: "Do not reopen from stale status.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -564,7 +601,10 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-fresh-status", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            throw new Error("relay failed")
+          }
           return undefined
         },
         async messages() {
@@ -578,9 +618,6 @@ describe("MissionControl background jobs relay and recovery", () => {
         async abort() {
           return true
         },
-        async prompt() {
-          throw new Error("relay failed")
-        },
       },
     })
 
@@ -592,7 +629,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Fresh status resume",
       prompt: "Allow a fresh status event to reopen idle work.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -631,7 +670,10 @@ describe("MissionControl background jobs relay and recovery", () => {
         async create() {
           return { id: "child-failed-relay", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean } }) {
+          if (input.body?.noReply) {
+            relayCount += 1
+          }
           return undefined
         },
         async messages() {
@@ -645,10 +687,6 @@ describe("MissionControl background jobs relay and recovery", () => {
         async abort() {
           return true
         },
-        async prompt() {
-          relayCount += 1
-          return undefined
-        },
       },
     })
 
@@ -660,7 +698,9 @@ describe("MissionControl background jobs relay and recovery", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Fail and relay",
       prompt: "Relay failure state on completion.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)

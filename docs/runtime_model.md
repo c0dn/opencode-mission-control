@@ -35,27 +35,22 @@ Rules:
 
 ## Parent-session attachment
 
-Background jobs resolve their parent in this order:
+The public `mc_job_start` tool attaches background jobs to the current tool caller session only.
 
-1. explicit `sessionId`
-2. current tool caller session
-3. latest root session in scope, if fallback is enabled
+Mission Control resolves the parent session from the active tool caller context, preferring message ownership checks when a current message ID is available.
 
 Failure rules:
 
-- unresolved explicit parent → `ParentSessionNotFound`
-- ambiguous fallback roots → `AmbiguousParentSession`
-- unavailable scope inspection → `ParentSessionScopeUnavailable`
+- unresolved current caller session → `ParentSessionScopeUnavailable`
 
 MVP safety invariant:
 
-- ambiguous automatic attachment must fail instead of guessing
+- job launch must fail instead of guessing another parent session
 
 ## Configuration invariants
 
 The runtime enforces these MVP-safe rules even if config overrides try to disable them:
 
-- `safety.requireExplicitParentOnAmbiguousAttach = true`
 - `safety.autoApprovePermissions = false`
 - `safety.autoAnswerQuestions = false`
 
@@ -228,7 +223,6 @@ Semantic search is optional.
 
 Important user-facing errors include:
 
-- `AmbiguousParentSession`
 - `ParentSessionNotFound`
 - `ParentSessionScopeUnavailable`
 - `JobNotFound`
@@ -238,7 +232,7 @@ Important user-facing errors include:
 - `IndexScopeMismatch`
 - `CurrentSessionUnavailable`
 
-Mission Control should return errors with actionable next steps, especially for ambiguous parent selection, blocked jobs, and scope mismatches.
+Mission Control should return errors with actionable next steps, especially for blocked jobs and scope mismatches.
 
 ## Non-goals
 

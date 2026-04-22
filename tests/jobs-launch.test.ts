@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises"
+import { mkdtemp, readFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -61,7 +61,9 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     const launchResult = await launcher.launch(adapter, {
       title: "Analyze session",
       prompt: "Inspect the current codebase state.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -85,7 +87,7 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     expect(status.data.job.lastObservedEvent).toBe("job.relay_delivered")
   })
 
-  test("auto-attaches to the current session when no explicit sessionId is provided", async () => {
+  test("attaches to the current session when caller context includes a session id", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
 
@@ -116,11 +118,7 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
       },
     })
 
-    const config = createMissionControlConfig({
-      jobs: {
-        autoAttachToCurrentSession: true,
-      },
-    })
+    const config = createMissionControlConfig()
     const controller = new MissionControlJobController(directory, config)
     await controller.start()
     const launcher = new MissionControlJobLauncher(() => config, controller)
@@ -144,6 +142,175 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
 
     expect(launchResult.data.sessionId).toBe("current-session")
     expect(createdParentID).toBe("current-session")
+  })
+
+  test("writes launch and tracked-event diagnostics to the debug file when enabled", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+    const debugFilePath = join(directory, "debug.jsonl")
+
+    const adapter = new OpenCodeAdapter(
+      {
+        session: {
+          ...parentSessionHandlers(directory),
+          async create() {
+            return { id: "child-session", directory }
+          },
+          async promptAsync() {
+            return undefined
+          },
+          async messages() {
+            return [
+              {
+                info: {
+                  id: "child-message",
+                  role: "assistant",
+                  time: { created: 10 },
+                },
+                parts: [
+                  {
+                    id: "child-part",
+                    type: "text",
+                    text: "Completed background analysis successfully.",
+                  },
+                ],
+              },
+            ]
+          },
+          async abort() {
+            return true
+          },
+          async prompt() {
+            return undefined
+          },
+        },
+      },
+      {
+        rootDir: directory,
+        debug: {
+          enabled: true,
+          filePath: debugFilePath,
+        },
+      },
+    )
+
+    const config = createMissionControlConfig({
+      debug: {
+        enabled: true,
+        filePath: debugFilePath,
+      },
+    })
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+    const launchResult = await launcher.launch(adapter, {
+      title: "Analyze session",
+      prompt: "Inspect the current codebase state.",
+    }, {
+      sessionId: "parent-session",
+      directory,
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "message.updated", {
+      sessionID: "child-session",
+      time: { updated: 20 },
+    })
+    await controller.handleEvent(adapter, "session.idle", {
+      sessionID: "child-session",
+      time: { updated: 30 },
+    })
+
+    const content = await readFile(debugFilePath, "utf8")
+    const messages = content
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as { message: string })
+      .map((entry) => entry.message)
+
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        "launch created job record",
+        "launch child session created",
+        "launch child async prompt submitted",
+        "handleEvent received tracked child event",
+        "handleEvent updated tracked child event",
+        "handleIdleTransition finalizing idle job",
+        "captureResult stored snapshot",
+        "relayResult delivered stored snapshot",
+      ]),
+    )
+  })
+
+  test("recovers the actual current session from the current message when tool context sessionId is stale", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    let createdParentID: string | undefined
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async get({ path }: { path: { id: string } }) {
+          return {
+            id: path.id,
+            directory,
+            title: path.id,
+            time: { created: 1, updated: path.id === "actual-session" ? 20 : 10 },
+          }
+        },
+        async list() {
+          return [
+            { id: "stale-session", directory, title: "Stale", time: { created: 1, updated: 10 } },
+            { id: "actual-session", directory, title: "Actual", time: { created: 2, updated: 20 } },
+          ]
+        },
+        async messages({ path }: { path: { id: string } }) {
+          return path.id === "actual-session"
+            ? [{ info: { id: "message-1" }, parts: [] }]
+            : [{ info: { id: "different-message" }, parts: [] }]
+        },
+        async create({ body }: { body: { parentID?: string } }) {
+          createdParentID = body.parentID
+          return { id: "child-auto", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig()
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(
+      adapter,
+      {
+        title: "Recovered auto attach",
+        prompt: "Follow the actual current session.",
+      },
+      {
+        sessionId: "stale-session",
+        messageId: "message-1",
+        directory,
+      },
+    )
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected recovered auto-attach launch to succeed")
+    }
+
+    expect(launchResult.data.sessionId).toBe("actual-session")
+    expect(createdParentID).toBe("actual-session")
   })
 
   test("reserves concurrency slots during launch so overlapping starts cannot exceed maxConcurrent", async () => {
@@ -198,7 +365,9 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     const firstLaunch = launcher.launch(adapter, {
       title: "First launch",
       prompt: "Hold the slot briefly.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     await Promise.resolve()
@@ -206,7 +375,9 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     const secondLaunch = await launcher.launch(adapter, {
       title: "Second launch",
       prompt: "This should be rejected while the first slot is reserved.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(secondLaunch.ok).toBe(false)
@@ -261,7 +432,9 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     const launchResult = await launcher.launch(adapter, {
       title: "Rollback queued job",
       prompt: "This launch should fail before the queued job sticks.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(false)
@@ -276,29 +449,13 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     expect(jobs.data).toHaveLength(0)
   })
 
-  test("fails with AmbiguousParentSession when fallback attach sees multiple root sessions", async () => {
+  test("fails with ParentSessionScopeUnavailable when no current caller session context is available", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
     tempDirs.push(directory)
 
     let createCalls = 0
     const adapter = new OpenCodeAdapter({
       session: {
-        async list() {
-          return [
-            {
-              id: "root-a",
-              directory,
-              title: "Root A",
-              time: { created: 1, updated: 11 },
-            },
-            {
-              id: "root-b",
-              directory,
-              title: "Root B",
-              time: { created: 2, updated: 10 },
-            },
-          ]
-        },
         async create() {
           createCalls += 1
           return { id: "should-not-exist" }
@@ -315,30 +472,94 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
       },
     })
 
-    const config = createMissionControlConfig({
-      jobs: {
-        autoAttachToCurrentSession: true,
-        allowLatestSessionFallback: true,
-      },
-      safety: {
-        requireExplicitParentOnAmbiguousAttach: false,
-      },
-    })
+    const config = createMissionControlConfig()
     const controller = new MissionControlJobController(directory, config)
     await controller.start()
     const launcher = new MissionControlJobLauncher(() => config, controller)
 
     const launchResult = await launcher.launch(adapter, {
-      title: "Ambiguous attach",
-      prompt: "Do not pick a random root session.",
+      title: "Missing caller context",
+      prompt: "Launch should fail without a current parent session.",
     })
 
     expect(launchResult.ok).toBe(false)
     if (launchResult.ok) {
-      throw new Error("Expected ambiguous attach launch to fail")
+      throw new Error("Expected launch to fail without caller context")
     }
 
-    expect(launchResult.error.code).toBe("AmbiguousParentSession")
+    expect(launchResult.error.code).toBe("ParentSessionScopeUnavailable")
+    expect(createCalls).toBe(0)
+  })
+
+  test("fails closed when the current caller session cannot be verified from the current message", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    let createCalls = 0
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async get({ path }: { path: { id: string } }) {
+          return {
+            id: path.id,
+            directory,
+            title: path.id,
+            time: { created: 1, updated: 10 },
+          }
+        },
+        async list() {
+          return [
+            {
+              id: "stale-session",
+              directory,
+              title: "Stale",
+              time: { created: 1, updated: 10 },
+            },
+            {
+              id: "other-session",
+              directory,
+              title: "Other",
+              time: { created: 2, updated: 20 },
+            },
+          ]
+        },
+        async create() {
+          createCalls += 1
+          return { id: "should-not-exist" }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async messages({ path }: { path: { id: string } }) {
+          return path.id === "stale-session"
+            ? [{ info: { id: "different-message" }, parts: [] }]
+            : [{ info: { id: "other-message" }, parts: [] }]
+        },
+        async abort() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig()
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "Unverified caller session",
+      prompt: "Do not guess another parent session.",
+    }, {
+      sessionId: "stale-session",
+      messageId: "message-1",
+      directory,
+    })
+
+    expect(launchResult.ok).toBe(false)
+    if (launchResult.ok) {
+      throw new Error("Expected launch to fail when caller message ownership cannot be proven")
+    }
+
+    expect(launchResult.error.code).toBe("ParentSessionScopeUnavailable")
     expect(createCalls).toBe(0)
   })
 
@@ -374,7 +595,9 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     const launchResult = await launcher.launch(adapter, {
       title: "Partial failure job",
       prompt: "This launch will fail after child creation.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(false)
@@ -390,113 +613,4 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     expect(listResult.data[0]?.state).toBe("failed")
   })
 
-  test("returns ParentSessionNotFound when an explicit sessionId cannot be resolved", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
-    tempDirs.push(directory)
-
-    let createCalls = 0
-    const adapter = new OpenCodeAdapter({
-      session: {
-        async get() {
-          throw new Error("not found")
-        },
-        async list() {
-          return []
-        },
-        async create() {
-          createCalls += 1
-          return { id: "should-not-exist" }
-        },
-        async promptAsync() {
-          return undefined
-        },
-        async messages() {
-          return []
-        },
-        async abort() {
-          return true
-        },
-      },
-    })
-
-    const config = createMissionControlConfig()
-    const controller = new MissionControlJobController(directory, config)
-    await controller.start()
-    const launcher = new MissionControlJobLauncher(() => config, controller)
-
-    const launchResult = await launcher.launch(adapter, {
-      title: "Missing explicit parent",
-      prompt: "This should fail early.",
-      sessionId: "parent-session",
-    })
-
-    expect(launchResult.ok).toBe(false)
-    if (launchResult.ok) {
-      throw new Error("Expected missing explicit parent launch to fail")
-    }
-
-    expect(launchResult.error.code).toBe("ParentSessionNotFound")
-    expect(createCalls).toBe(0)
-  })
-
-  test("rejects a blank explicit sessionId instead of falling back to auto-attach", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
-    tempDirs.push(directory)
-
-    let createCalls = 0
-    const adapter = new OpenCodeAdapter({
-      session: {
-        async get() {
-          throw new Error("not found")
-        },
-        async list() {
-          return [
-            {
-              id: "root-session",
-              directory,
-              title: "Root Session",
-              time: { created: 1, updated: 10 },
-            },
-          ]
-        },
-        async create() {
-          createCalls += 1
-          return { id: "should-not-exist" }
-        },
-        async promptAsync() {
-          return undefined
-        },
-        async messages() {
-          return []
-        },
-        async abort() {
-          return true
-        },
-      },
-    })
-
-    const config = createMissionControlConfig({
-      jobs: {
-        autoAttachToCurrentSession: true,
-        allowLatestSessionFallback: true,
-      },
-    })
-    const controller = new MissionControlJobController(directory, config)
-    await controller.start()
-    const launcher = new MissionControlJobLauncher(() => config, controller)
-
-    const launchResult = await launcher.launch(adapter, {
-      title: "Blank explicit parent",
-      prompt: "Do not auto-attach.",
-      sessionId: "   ",
-    })
-
-    expect(launchResult.ok).toBe(false)
-    if (launchResult.ok) {
-      throw new Error("Expected blank explicit parent launch to fail")
-    }
-
-    expect(launchResult.error.code).toBe("ParentSessionNotFound")
-    expect(createCalls).toBe(0)
-  })
 })

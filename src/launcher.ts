@@ -1,5 +1,4 @@
 import type { OpenCodeAdapter } from "./opencode-client.js"
-import { extractDirectory, extractParentSessionID, extractSessionID, extractSessionTimestamp } from "./session-extractors.js"
 import { MissionControlJobController } from "./jobs.js"
 import { buildAttachedJobPrompt } from "./prompts.js"
 import type {
@@ -52,7 +51,7 @@ export class MissionControlJobLauncher {
     let reservationTransferred = false
 
     try {
-      const parentResolution = await this.resolveParentSession(adapter, args, caller, config)
+      const parentResolution = await this.resolveParentSession(adapter, caller)
       if (!parentResolution.ok) {
         return parentResolution
       }
@@ -74,7 +73,25 @@ export class MissionControlJobLauncher {
         },
       )
 
+      await adapter.debug("launch created job record", {
+        jobId: job.jobID,
+        title: job.title,
+        parentSessionId: job.parentSessionID,
+        parentDirectory: job.parentDirectory,
+      })
+
       await this.controller.markLaunching(job.jobID)
+      await adapter.debug("launch marked job launching", {
+        jobId: job.jobID,
+      })
+
+      await adapter.debug("launch creating child session", {
+        jobId: job.jobID,
+        parentSessionId: parentResolution.data.sessionId,
+        parentDirectory: parentResolution.data.directory,
+        childTitle: `${config.jobs.titlePrefix}: ${title}`,
+      })
+
       const childSession = await adapter.createChildSession(
         parentResolution.data.sessionId,
         `${config.jobs.titlePrefix}: ${title}`,
@@ -87,10 +104,43 @@ export class MissionControlJobLauncher {
         throw new Error("Child session creation did not return a session id")
       }
 
+      await adapter.debug("launch child session created", {
+        jobId: job.jobID,
+        childSessionId: childSessionID,
+        childDirectory,
+      })
+
       await this.controller.bindChildSession(job.jobID, childSessionID, childDirectory)
 
-      await adapter.promptAsync(childSessionID, buildAttachedJobPrompt(job), childDirectory)
+      await adapter.debug("launch child session bound", {
+        jobId: job.jobID,
+        childSessionId: childSessionID,
+        childDirectory,
+      })
+
+      const attachedPrompt = buildAttachedJobPrompt(job)
+
+      await adapter.debug("launch submitting child async prompt", {
+        jobId: job.jobID,
+        childSessionId: childSessionID,
+        childDirectory,
+        promptLength: attachedPrompt.length,
+      })
+
+      await adapter.promptAsync(childSessionID, attachedPrompt, childDirectory)
+
+      await adapter.debug("launch child async prompt submitted", {
+        jobId: job.jobID,
+        childSessionId: childSessionID,
+      })
+
       await this.controller.markLaunched(job.jobID, childSessionID, childDirectory)
+
+      await adapter.debug("launch marked job launched", {
+        jobId: job.jobID,
+        childSessionId: childSessionID,
+        childDirectory,
+      })
 
       return ok({
         jobId: job.jobID,
@@ -100,6 +150,13 @@ export class MissionControlJobLauncher {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown launch failure"
+
+      await adapter.debug("launch failed", {
+        jobId: job?.jobID,
+        parentSessionId: job?.parentSessionID,
+        childSessionId: job?.childSessionID,
+        error: message,
+      })
 
       if (job && this.controller.status(job.jobID).ok) {
         const currentStatus = this.controller.status(job.jobID)
@@ -132,117 +189,39 @@ export class MissionControlJobLauncher {
 
   private async resolveParentSession(
     adapter: OpenCodeAdapter,
-    args: JobStartArgs,
     caller: ToolCallerContext,
-    config: MissionControlConfig,
   ): Promise<ToolResult<ParentSessionResolution>> {
-    if (args.sessionId !== undefined) {
-      const explicitParentSessionID = args.sessionId.trim()
-      if (!explicitParentSessionID) {
-        return fail(
-          "ParentSessionNotFound",
-          "A blank sessionId is not a valid explicit parent session reference.",
-          "Pass a real session ID or omit sessionId to attach to the caller session.",
-        )
-      }
+    const callerResolution = await adapter.resolveCallerSession(caller)
+    if (callerResolution) {
+      await adapter.debug("resolveParentSession used caller-derived parent", {
+        mode: callerResolution.mode,
+        sessionId: callerResolution.sessionID,
+        directory: callerResolution.directory ?? caller.directory ?? caller.worktree,
+        callerSessionId: caller.sessionId,
+        callerMessageId: caller.messageId,
+      })
 
-      try {
-        const resolved = await adapter.resolveSession(explicitParentSessionID)
-        return ok({
-          mode: "explicit_parent",
-          sessionId: explicitParentSessionID,
-          directory: resolved.directory,
-          confidence: "explicit",
-        })
-      } catch {
-        return fail(
-          "ParentSessionNotFound",
-          `Parent session '${explicitParentSessionID}' was not found.`,
-          "Pass an existing sessionId or omit it to attach to the caller session.",
-        )
-      }
+      return ok({
+        mode: callerResolution.mode,
+        sessionId: callerResolution.sessionID,
+        directory: callerResolution.directory ?? caller.directory ?? caller.worktree,
+        confidence: "high",
+      })
     }
 
-    if (caller.sessionId) {
-      try {
-        const resolved = await adapter.resolveSession(caller.sessionId)
-        return ok({
-          mode: "current_session",
-          sessionId: caller.sessionId,
-          directory: resolved.directory ?? caller.directory,
-          confidence: "high",
-        })
-      } catch {
-        if (!config.jobs.allowLatestSessionFallback) {
-          return fail(
-            "ParentSessionScopeUnavailable",
-            "The caller session could not be resolved for automatic attachment.",
-            "Pass sessionId explicitly or enable latest-session fallback.",
-          )
-        }
-      }
-    }
-
-    if (!config.jobs.allowLatestSessionFallback) {
-      return fail(
-        "ParentSessionScopeUnavailable",
-        "Automatic attachment could not resolve a caller parent session.",
-        "Pass sessionId explicitly or enable latest-session fallback.",
-      )
-    }
-
-    let sessions: any[]
-    try {
-      sessions = await adapter.listSessions({ directory: caller.directory })
-    } catch {
-        return fail(
-          "ParentSessionScopeUnavailable",
-          "Mission Control could not inspect the current session scope for a fallback parent.",
-          "Pass sessionId explicitly and retry.",
-        )
-      }
-
-    const rootSessions = sessions
-      .filter((session) => extractSessionID(session) && !extractParentSessionID(session))
-      .sort((left, right) => toUpdatedAt(right) - toUpdatedAt(left))
-
-    if (rootSessions.length === 0) {
-        return fail(
-          "ParentSessionNotFound",
-          "No root session is available in the current scope for fallback attachment.",
-          "Pass sessionId explicitly and retry.",
-        )
-      }
-
-    if (rootSessions.length > 1 && config.safety.requireExplicitParentOnAmbiguousAttach) {
-        return fail(
-          "AmbiguousParentSession",
-          "More than one root session is available for fallback attachment.",
-          "Pass sessionId explicitly to choose the correct parent session.",
-        )
-      }
-
-    const chosen = rootSessions[0]
-    const chosenSessionID = extractSessionID(chosen)
-    if (!chosenSessionID) {
-        return fail(
-          "ParentSessionScopeUnavailable",
-          "Mission Control could not read a fallback parent session ID from the current scope.",
-          "Pass sessionId explicitly and retry.",
-        )
-      }
-
-    return ok({
-      mode: "scope_latest_session",
-      sessionId: chosenSessionID,
-      directory: extractDirectory(chosen) ?? caller.directory,
-      confidence: "best_effort",
+    await adapter.debug("resolveParentSession could not resolve current caller session", {
+      callerSessionId: caller.sessionId,
+      callerMessageId: caller.messageId,
+      callerDirectory: caller.directory,
+      callerWorktree: caller.worktree,
     })
-  }
-}
 
-const toUpdatedAt = (session: any) => {
-  return extractSessionTimestamp(session, "updated") ?? extractSessionTimestamp(session, "created") ?? 0
+    return fail(
+      "ParentSessionScopeUnavailable",
+      "Mission Control could not resolve the current caller session for job launch.",
+      "Call mc_job_start from the parent session you want to attach to and retry.",
+    )
+  }
 }
 
 const normalizeJobTitle = (title: string | undefined, prompt: string) => {

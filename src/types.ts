@@ -3,9 +3,8 @@ export type SemanticProviderName = "disabled" | "jina"
 export type SessionDiscoveryScope = "current_directory" | "global_unscoped"
 
 export type ParentResolutionMode =
-  | "explicit_parent"
   | "current_session"
-  | "scope_latest_session"
+  | "message_owner_session"
 
 export type PermissionReplyMode = "once" | "always" | "reject"
 export type PendingInputKind = "permission" | "question"
@@ -23,7 +22,6 @@ export type JobState =
   | "orphaned"
 
 export type MissionControlErrorCode =
-  | "AmbiguousParentSession"
   | "ParentSessionNotFound"
   | "ParentSessionScopeUnavailable"
   | "JobNotFound"
@@ -61,15 +59,16 @@ export interface MissionControlConfig {
   jobs: {
     enabled: boolean
     maxConcurrent: number
-    autoAttachToCurrentSession: boolean
-    allowLatestSessionFallback: boolean
     titlePrefix: string
     keepChildSessionOnCompletion: boolean
   }
   safety: {
-    requireExplicitParentOnAmbiguousAttach: boolean
     autoApprovePermissions: false
     autoAnswerQuestions: false
+  }
+  debug: {
+    enabled: boolean
+    filePath?: string
   }
 }
 
@@ -197,7 +196,6 @@ export interface JobEventsResult {
 
 export interface JobStartArgs {
   prompt: string
-  sessionId?: string
   title?: string
 }
 
@@ -299,6 +297,7 @@ export interface RuntimeSessionMetadata {
 
 export interface ToolCallerContext {
   sessionId?: string
+  messageId?: string
   directory?: string
   worktree?: string
 }
@@ -398,6 +397,7 @@ export interface MissionControlPluginOptions {
   observe?: Partial<MissionControlConfig["observe"]>
   jobs?: Partial<MissionControlConfig["jobs"]>
   safety?: Partial<MissionControlConfig["safety"]>
+  debug?: Partial<MissionControlConfig["debug"]>
 }
 
 export interface MissionControlRuntimeSecrets {

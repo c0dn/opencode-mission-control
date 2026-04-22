@@ -12,9 +12,9 @@ const TOOL_GUIDANCE: Record<string, string> = {
   mc_session_events:
     "Use this for recent live state, not full transcript history. Example: mc_session_events({ sessionId: 'ses_123', withChildren: true, limit: 25 }).",
   mc_session_search:
-    "Use this for indexed search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'AmbiguousParentSession', scope: 'global', exact: true }); mc_session_search({ query: 'relay failure', sessionId: 'ses_123' }). Prefer mc_session_read when you need raw tool outputs.",
+    "Use this for indexed search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'ParentSessionScopeUnavailable', scope: 'global', exact: true }); mc_session_search({ query: 'relay failure', sessionId: 'ses_123' }). Prefer mc_session_read when you need raw tool outputs.",
   mc_job_start:
-    "Starts a background child session. Examples: mc_job_start({ prompt: 'Summarize blockers in this session.' }); mc_job_start({ sessionId: 'ses_123', title: 'Search audit', prompt: 'Find mentions of global scope behavior.' }). Omit sessionId to attach to the current parent session. Automatic parent notifications depend on the current runtime supporting parent relay.",
+    "Starts a background child session attached to the current parent session only. Examples: mc_job_start({ prompt: 'Summarize blockers in this session.' }); mc_job_start({ title: 'Search audit', prompt: 'Find mentions of global scope behavior.' }). Call it from the parent session you want to attach to. Automatic parent notifications depend on the current runtime supporting parent relay.",
   mc_job_status:
     "Use this to inspect one background job, including any pending permission/question input and its latest stable result, if available. Example: mc_job_status({ jobId: 'job_123' }).",
   mc_job_events:

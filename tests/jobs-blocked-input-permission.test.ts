@@ -24,12 +24,12 @@ describe("MissionControl background jobs blocked input - permission", () => {
         async create() {
           return { id: "child-permission", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+          if (input.body?.noReply) {
+            parentMessages.push(input.body.parts?.[0]?.text ?? "")
+          }
+
           return undefined
-        },
-        async prompt(input: { body: { parts?: Array<{ text?: string }> } }) {
-          parentMessages.push(input.body.parts?.[0]?.text ?? "")
-          return true
         },
         async messages() {
           return []
@@ -48,7 +48,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Permission blocked",
       prompt: "Run repo checks when allowed.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -104,12 +106,12 @@ describe("MissionControl background jobs blocked input - permission", () => {
         async create() {
           return { id: "child-sparse-permission", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+          if (input.body?.noReply) {
+            parentMessages.push(input.body.parts?.[0]?.text ?? "")
+          }
+
           return undefined
-        },
-        async prompt(input: { body: { parts?: Array<{ text?: string }> } }) {
-          parentMessages.push(input.body.parts?.[0]?.text ?? "")
-          return true
         },
         async messages() {
           return []
@@ -142,7 +144,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Sparse permission",
       prompt: "Recover pending permission from the native list API.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -179,12 +183,12 @@ describe("MissionControl background jobs blocked input - permission", () => {
         async create() {
           return { id: "child-status-permission", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+          if (input.body?.noReply) {
+            parentMessages.push(input.body.parts?.[0]?.text ?? "")
+          }
+
           return undefined
-        },
-        async prompt(input: { body: { parts?: Array<{ text?: string }> } }) {
-          parentMessages.push(input.body.parts?.[0]?.text ?? "")
-          return true
         },
         async messages() {
           return []
@@ -217,7 +221,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Status fallback permission",
       prompt: "Recover blocked permission from session.status only.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -256,12 +262,12 @@ describe("MissionControl background jobs blocked input - permission", () => {
         async create() {
           return { id: "child-status-sparse", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+          if (input.body?.noReply) {
+            parentMessages.push(input.body.parts?.[0]?.text ?? "")
+          }
+
           return undefined
-        },
-        async prompt(input: { body: { parts?: Array<{ text?: string }> } }) {
-          parentMessages.push(input.body.parts?.[0]?.text ?? "")
-          return true
         },
         async messages() {
           return []
@@ -285,7 +291,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Status sparse blocked",
       prompt: "Show blocked state even when request details are unavailable.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -350,7 +358,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Permission reply",
       prompt: "Wait for permission before continuing.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -399,6 +409,99 @@ describe("MissionControl background jobs blocked input - permission", () => {
 
     expect(status.data.job.state).toBe("running")
     expect(status.data.job.pendingInput).toBeUndefined()
+
+    const eventsResult = controller.jobEvents(launchResult.data.jobId, 10)
+    expect(eventsResult.ok).toBe(true)
+    if (!eventsResult.ok) {
+      throw new Error("Expected permission-replied job events to exist")
+    }
+
+    const permissionEvent = eventsResult.data.events.find((event) => event.type === "permission.replied")
+    expect(permissionEvent?.metadata).toMatchObject({
+      requestId: "perm-2",
+      replySource: "mission_control_local_reply",
+      reply: "once",
+      callerSessionId: "parent-session",
+      parentSessionId: "parent-session",
+      localReplyJobId: launchResult.data.jobId,
+    })
+    expect(permissionEvent?.metadata?.initiatedAt).toEqual(expect.any(Number))
+  })
+
+  test("records external provenance when a permission reply arrives without mc_job_permission_reply", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-jobs-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        ...parentSessionHandlers(directory),
+        async create() {
+          return { id: "child-external-permission-reply", directory }
+        },
+        async promptAsync() {
+          return undefined
+        },
+        async prompt() {
+          return true
+        },
+        async messages() {
+          return []
+        },
+        async abort() {
+          return true
+        },
+      },
+      permission: {
+        async reply() {
+          return true
+        },
+      },
+    })
+
+    const config = createMissionControlConfig()
+    const controller = new MissionControlJobController(directory, config)
+    await controller.start()
+    const launcher = new MissionControlJobLauncher(() => config, controller)
+
+    const launchResult = await launcher.launch(adapter, {
+      title: "External permission reply provenance",
+      prompt: "Wait for a permission reply from outside Mission Control.",
+    }, {
+      sessionId: "parent-session",
+      directory,
+    })
+
+    expect(launchResult.ok).toBe(true)
+    if (!launchResult.ok) {
+      throw new Error("Expected launch to succeed")
+    }
+
+    await controller.handleEvent(adapter, "permission.asked", {
+      sessionID: "child-external-permission-reply",
+      id: "perm-external-source",
+      permission: "external_directory",
+      patterns: ["/tmp/*"],
+      always: [],
+      metadata: {},
+    })
+
+    await controller.handleEvent(adapter, "permission.replied", {
+      sessionID: "child-external-permission-reply",
+      requestID: "perm-external-source",
+    })
+
+    const eventsResult = controller.jobEvents(launchResult.data.jobId, 10)
+    expect(eventsResult.ok).toBe(true)
+    if (!eventsResult.ok) {
+      throw new Error("Expected external permission reply events to exist")
+    }
+
+    const permissionEvent = eventsResult.data.events.find((event) => event.type === "permission.replied")
+    expect(permissionEvent?.detail).toBe("Permission request resolved by an external reply source.")
+    expect(permissionEvent?.metadata).toMatchObject({
+      requestId: "perm-external-source",
+      replySource: "external_unknown_reply",
+    })
   })
 
   test("does not reopen a replied permission request when session.status fallback still returns the just-answered request", async () => {
@@ -451,7 +554,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "No reopen from listed request",
       prompt: "Ignore the just-answered listed request.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -531,7 +636,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Parent scoped reply",
       prompt: "Only the parent may answer this.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -602,7 +709,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Ignore stale permission ask",
       prompt: "Do not reopen after the request was already answered.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -677,7 +786,9 @@ describe("MissionControl background jobs blocked input - permission", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "No pending permission",
       prompt: "Do not block.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)

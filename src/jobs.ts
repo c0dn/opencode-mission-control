@@ -6,13 +6,41 @@ import { dirname, join } from "node:path"
 import type { OpenCodeAdapter } from "./opencode-client.js"
 import { deliverBlockedStateRelay, deliverParentRelay, deliverPendingInputRelay, deliverProgressRelay } from "./relay.js"
 import {
-  extractPermissionRequest,
-  extractQuestionRequest,
   extractRequestID,
   extractSessionID,
   extractSessionTimestamp,
   extractStatus,
 } from "./session-extractors.js"
+import {
+  buildStructuredSummary,
+  canExposeStoredResult,
+  clearPendingInput,
+  collectBlockers,
+  collectMessagePartsText,
+  createJobEventID,
+  createJobID,
+  defaultSummaryForState,
+  describePendingInput,
+  hasConflictingPendingInput,
+  hasMismatchedPendingRequest,
+  isClosedJobState,
+  isLiveTrackedJobState,
+  isRecoverableJobState,
+  isResolvedPendingRequest,
+  isSamePendingInput,
+  isStableResultState,
+  mapJobStateToSnapshotState,
+  mergeBlockers,
+  normalizeLoadedJob,
+  parseStructuredFinalReport,
+  shouldDebugTrackedEvent,
+  toPendingPermissionRequest,
+  toPendingQuestionRequest,
+  toPublicJob,
+  toPublicJobEvent,
+  toPublicJobResult,
+  truncateSummary,
+} from "./job-helpers.js"
 import type {
   BackgroundJob,
   JobEventsResult,
@@ -45,8 +73,54 @@ interface JobStoreSnapshot {
   events?: JobLifecycleEvent[]
 }
 
+type PermissionReplyProvenance =
+  | {
+      source: "mission_control_local_reply"
+      jobId: string
+      parentSessionId: string
+      reply: JobPermissionReplyArgs["reply"]
+      initiatedAt: number
+      callerSessionId?: string
+      callerMessageId?: string
+    }
+  | {
+      source: "external_unknown_reply"
+    }
+
+interface LocalPermissionReplyIntent {
+  jobId: string
+  parentSessionId: string
+  reply: JobPermissionReplyArgs["reply"]
+  initiatedAt: number
+  callerSessionId?: string
+  callerMessageId?: string
+}
+
+const buildPermissionReplyMetadata = (
+  requestId: string | undefined,
+  provenance: PermissionReplyProvenance,
+  extras: {
+    message?: string
+  } = {},
+) => ({
+  ...(requestId ? { requestId } : {}),
+  replySource: provenance.source,
+  ...(provenance.source === "mission_control_local_reply"
+    ? {
+        reply: provenance.reply,
+        initiatedAt: provenance.initiatedAt,
+        callerSessionId: provenance.callerSessionId,
+        callerMessageId: provenance.callerMessageId,
+        parentSessionId: provenance.parentSessionId,
+        localReplyJobId: provenance.jobId,
+      }
+    : {}),
+  ...(extras.message ? { message: extras.message } : {}),
+})
+
 export class MissionControlJobController {
   private static readonly VERSION = 2
+  private static readonly LOCAL_PERMISSION_REPLY_TTL_MS = 60_000
 
   private rootDir: string
   private config: MissionControlConfig
@@ -54,6 +128,7 @@ export class MissionControlJobController {
   private readonly results = new Map<string, JobResultSnapshot>()
   private readonly events = new Map<string, JobLifecycleEvent[]>()
   private readonly childSessionToJobID = new Map<string, string>()
+  private readonly recentLocalPermissionReplies = new Map<string, LocalPermissionReplyIntent>()
   private launchReservations = 0
   private persistChain = Promise.resolve()
   private lastLoadWarning: string | undefined
@@ -79,7 +154,7 @@ export class MissionControlJobController {
     let mutated = false
 
     for (const persistedJob of snapshot.jobs) {
-      const job = normalizeLoadedJob(persistedJob, this.config)
+      const job = normalizeLoadedJob(persistedJob)
       if (isRecoverableJobState(job.state) || (job.state === "idle" && job.relayState !== "delivered")) {
         const previousState = job.state
         job.state = "orphaned"
@@ -120,6 +195,7 @@ export class MissionControlJobController {
     this.results.clear()
     this.events.clear()
     this.childSessionToJobID.clear()
+    this.recentLocalPermissionReplies.clear()
     this.launchReservations = 0
     this.persistChain = Promise.resolve()
   }
@@ -294,23 +370,99 @@ export class MissionControlJobController {
     }
 
     const previousState = job.state
+    const previousObservedEvent = job.lastObservedEvent
     const previousSourceUpdatedAt = job.lastSourceUpdatedAt
     const eventUpdatedAt = extractSessionTimestamp(payload, "updated")
+    const requestID = extractRequestID(payload)
+    const extractedSessionStatus = type === "session.status" ? extractStatus(payload) : undefined
     const hasFreshSourceTimestamp =
       eventUpdatedAt === undefined || eventUpdatedAt >= (previousSourceUpdatedAt ?? Number.NEGATIVE_INFINITY)
     const canLeaveIdle =
       previousState !== "idle" ||
       eventUpdatedAt === undefined ||
       eventUpdatedAt > (previousSourceUpdatedAt ?? Number.NEGATIVE_INFINITY)
-    job.lastObservedEvent = type
+    const tracksHeartbeatEvent = shouldDebugTrackedEvent(type, previousState, previousState)
+    if (type !== "message.updated" && type !== "message.part.updated") {
+      job.lastObservedEvent = type
+    } else if (tracksHeartbeatEvent) {
+      job.lastObservedEvent = type
+    }
+
+    const logIgnoredEvent = async (
+      reason: string,
+      extra: Record<string, unknown> = {},
+      options: {
+        persistInJobFeed?: boolean
+        touchUpdatedAt?: boolean
+        advanceSourceTimestamp?: boolean
+      } = {},
+    ) => {
+      const persistInJobFeed = options.persistInJobFeed ?? true
+      const touchUpdatedAt = options.touchUpdatedAt ?? true
+      const advanceSourceTimestamp = options.advanceSourceTimestamp ?? true
+
+      job.lastObservedEvent = previousObservedEvent
+      if (advanceSourceTimestamp && eventUpdatedAt !== undefined) {
+        job.lastSourceUpdatedAt = Math.max(job.lastSourceUpdatedAt ?? Number.NEGATIVE_INFINITY, eventUpdatedAt)
+      }
+      if (persistInJobFeed) {
+        this.recordJobEvent(job, "job.event_ignored", {
+          detail: reason,
+          metadata: {
+            eventType: type,
+            eventSessionId: sessionID,
+            requestId: requestID,
+            sessionStatus: extractedSessionStatus,
+            ...extra,
+          },
+        })
+      }
+      if (touchUpdatedAt) {
+        job.updatedAt = Date.now()
+      }
+      if (persistInJobFeed || touchUpdatedAt || advanceSourceTimestamp) {
+        await this.persist()
+      }
+      await this.debugJob(adapter, "handleEvent ignored tracked child event", job, {
+        eventType: type,
+        eventSessionId: sessionID,
+        eventUpdatedAt,
+        requestId: requestID,
+        sessionStatus: extractedSessionStatus,
+        previousState,
+        reason,
+        ...extra,
+      })
+    }
+
+    if (shouldDebugTrackedEvent(type, previousState, previousState)) {
+      await this.debugJob(adapter, "handleEvent received tracked child event", job, {
+        eventType: type,
+        eventSessionId: sessionID,
+        eventUpdatedAt,
+        requestId: requestID,
+        sessionStatus: extractedSessionStatus,
+        previousState,
+        previousPendingInputKind: job.pendingInput?.kind,
+        previousPendingRequestId: job.pendingInput?.requestId,
+        canLeaveIdle,
+        hasFreshSourceTimestamp,
+      })
+    }
 
     switch (type) {
       case "permission.asked":
         const permissionRequest = await this.resolvePendingPermissionRequest(adapter, job, sessionID, payload)
         if (permissionRequest && isResolvedPendingRequest(job, "permission", permissionRequest.requestId)) {
+          await logIgnoredEvent("resolved permission replay", {
+            ignoredRequestId: permissionRequest.requestId,
+          })
           return
         }
         if (permissionRequest && hasConflictingPendingInput(job, permissionRequest)) {
+          await logIgnoredEvent("conflicting permission request", {
+            ignoredRequestId: permissionRequest.requestId,
+          })
           return
         }
         const effectivePermissionRequest =
@@ -336,10 +488,19 @@ export class MissionControlJobController {
         break
       case "permission.replied":
         const permissionRequestID = extractRequestID(payload)
+        const permissionReplyProvenance = this.consumePermissionReplyProvenance(permissionRequestID)
         if (hasMismatchedPendingRequest(job, "permission", permissionRequestID)) {
+          await logIgnoredEvent("mismatched permission reply", {
+            ignoredRequestId: permissionRequestID,
+            ...buildPermissionReplyMetadata(permissionRequestID, permissionReplyProvenance),
+          })
           return
         }
         if (permissionRequestID && isResolvedPendingRequest(job, "permission", permissionRequestID)) {
+          await logIgnoredEvent("duplicate permission reply", {
+            ignoredRequestId: permissionRequestID,
+            ...buildPermissionReplyMetadata(permissionRequestID, permissionReplyProvenance),
+          })
           return
         }
         if (canLeaveIdle) {
@@ -353,16 +514,42 @@ export class MissionControlJobController {
         this.clearStaleSnapshot(job, previousState)
         this.recordJobEvent(job, type, {
           previousState,
-          detail: "Permission request resolved.",
-          metadata: permissionRequestID ? { requestId: permissionRequestID } : undefined,
+          detail:
+            permissionReplyProvenance.source === "external_unknown_reply"
+              ? "Permission request resolved by an external reply source."
+              : "Permission request resolved.",
+          metadata: buildPermissionReplyMetadata(permissionRequestID, permissionReplyProvenance),
+        })
+        await this.debugJob(adapter, "handleEvent observed permission reply provenance", job, {
+          requestId: permissionRequestID,
+          replySource: permissionReplyProvenance.source,
+          ...(permissionReplyProvenance.source === "mission_control_local_reply"
+            ? {
+                reply: permissionReplyProvenance.reply,
+                initiatedAt: permissionReplyProvenance.initiatedAt,
+                callerSessionId: permissionReplyProvenance.callerSessionId,
+                parentSessionId: permissionReplyProvenance.parentSessionId,
+                localReplyJobId: permissionReplyProvenance.jobId,
+              }
+            : {
+                externalResolution: true,
+              }),
+          previousState,
+          nextState: job.state,
         })
         break
       case "question.asked":
         const questionRequest = await this.resolvePendingQuestionRequest(adapter, job, sessionID, payload)
         if (questionRequest && isResolvedPendingRequest(job, "question", questionRequest.requestId)) {
+          await logIgnoredEvent("resolved question replay", {
+            ignoredRequestId: questionRequest.requestId,
+          })
           return
         }
         if (questionRequest && hasConflictingPendingInput(job, questionRequest)) {
+          await logIgnoredEvent("conflicting question request", {
+            ignoredRequestId: questionRequest.requestId,
+          })
           return
         }
         const effectiveQuestionRequest =
@@ -389,9 +576,15 @@ export class MissionControlJobController {
       case "question.replied":
         const questionRequestID = extractRequestID(payload)
         if (hasMismatchedPendingRequest(job, "question", questionRequestID)) {
+          await logIgnoredEvent("mismatched question reply", {
+            ignoredRequestId: questionRequestID,
+          })
           return
         }
         if (questionRequestID && isResolvedPendingRequest(job, "question", questionRequestID)) {
+          await logIgnoredEvent("duplicate question reply", {
+            ignoredRequestId: questionRequestID,
+          })
           return
         }
         if (canLeaveIdle) {
@@ -412,9 +605,15 @@ export class MissionControlJobController {
       case "question.rejected":
         const rejectedQuestionRequestID = extractRequestID(payload)
         if (hasMismatchedPendingRequest(job, "question", rejectedQuestionRequestID)) {
+          await logIgnoredEvent("mismatched question reject", {
+            ignoredRequestId: rejectedQuestionRequestID,
+          })
           return
         }
         if (rejectedQuestionRequestID && isResolvedPendingRequest(job, "question", rejectedQuestionRequestID)) {
+          await logIgnoredEvent("duplicate question reject", {
+            ignoredRequestId: rejectedQuestionRequestID,
+          })
           return
         }
         clearPendingInput(job, "question", rejectedQuestionRequestID)
@@ -447,6 +646,11 @@ export class MissionControlJobController {
       case "session.idle":
         if (hasFreshSourceTimestamp) {
           await this.handleIdleTransition(adapter, job, previousState, type)
+        } else {
+          await logIgnoredEvent("stale session idle event", {
+            previousSourceUpdatedAt,
+          })
+          return
         }
         break
       case "session.status":
@@ -455,20 +659,38 @@ export class MissionControlJobController {
         if (sessionStatus === "idle") {
           if (hasFreshSourceTimestamp) {
             await this.handleIdleTransition(adapter, job, previousState, type)
+          } else {
+            await logIgnoredEvent("stale idle session status", {
+              previousSourceUpdatedAt,
+            })
+            return
           }
           break
+        } else if (!hasFreshSourceTimestamp || !canLeaveIdle) {
+            await logIgnoredEvent("stale session status event", {
+              previousSourceUpdatedAt,
+              sessionStatus,
+            })
+            return
         } else if (sessionStatus === "waiting_permission" && canLeaveIdle) {
           const currentPendingPermission = job.pendingInput?.kind === "permission" ? job.pendingInput : undefined
           const pendingPermission = await this.resolvePendingPermissionRequest(adapter, job, sessionID, payload)
-          const resolvedPermissionReplay = Boolean(
-            pendingPermission && isResolvedPendingRequest(job, "permission", pendingPermission.requestId),
-          )
+          if (pendingPermission && isResolvedPendingRequest(job, "permission", pendingPermission.requestId)) {
+            await logIgnoredEvent("resolved permission replay", {
+              ignoredRequestId: pendingPermission.requestId,
+              sessionStatus,
+            })
+            return
+          }
+          if (pendingPermission && hasConflictingPendingInput(job, pendingPermission)) {
+            await logIgnoredEvent("conflicting permission request", {
+              ignoredRequestId: pendingPermission.requestId,
+              sessionStatus,
+            })
+            return
+          }
           let effectivePendingPermission = currentPendingPermission
-          if (
-            pendingPermission &&
-            !resolvedPermissionReplay &&
-            !hasConflictingPendingInput(job, pendingPermission)
-          ) {
+          if (pendingPermission) {
             job.pendingInput = pendingPermission
             effectivePendingPermission = pendingPermission
             if (!isSamePendingInput(currentPendingPermission, pendingPermission)) {
@@ -477,26 +699,29 @@ export class MissionControlJobController {
           }
           if (effectivePendingPermission) {
             job.state = "waiting_permission"
-          } else if (
-            !currentPendingPermission &&
-            !resolvedPermissionReplay &&
-            previousState !== "waiting_permission"
-          ) {
+          } else if (!currentPendingPermission && previousState !== "waiting_permission") {
             job.state = "waiting_permission"
             await this.safeDeliverBlockedStateRelay(adapter, job, "permission")
           }
         } else if (sessionStatus === "waiting_question" && canLeaveIdle) {
           const currentPendingQuestion = job.pendingInput?.kind === "question" ? job.pendingInput : undefined
           const pendingQuestion = await this.resolvePendingQuestionRequest(adapter, job, sessionID, payload)
-          const resolvedQuestionReplay = Boolean(
-            pendingQuestion && isResolvedPendingRequest(job, "question", pendingQuestion.requestId),
-          )
+          if (pendingQuestion && isResolvedPendingRequest(job, "question", pendingQuestion.requestId)) {
+            await logIgnoredEvent("resolved question replay", {
+              ignoredRequestId: pendingQuestion.requestId,
+              sessionStatus,
+            })
+            return
+          }
+          if (pendingQuestion && hasConflictingPendingInput(job, pendingQuestion)) {
+            await logIgnoredEvent("conflicting question request", {
+              ignoredRequestId: pendingQuestion.requestId,
+              sessionStatus,
+            })
+            return
+          }
           let effectivePendingQuestion = currentPendingQuestion
-          if (
-            pendingQuestion &&
-            !resolvedQuestionReplay &&
-            !hasConflictingPendingInput(job, pendingQuestion)
-          ) {
+          if (pendingQuestion) {
             job.pendingInput = pendingQuestion
             effectivePendingQuestion = pendingQuestion
             if (!isSamePendingInput(currentPendingQuestion, pendingQuestion)) {
@@ -505,11 +730,7 @@ export class MissionControlJobController {
           }
           if (effectivePendingQuestion) {
             job.state = "waiting_question"
-          } else if (
-            !currentPendingQuestion &&
-            !resolvedQuestionReplay &&
-            previousState !== "waiting_question"
-          ) {
+          } else if (!currentPendingQuestion && previousState !== "waiting_question") {
             job.state = "waiting_question"
             await this.safeDeliverBlockedStateRelay(adapter, job, "question")
           }
@@ -535,11 +756,18 @@ export class MissionControlJobController {
           job.state = "running"
         }
         this.clearStaleSnapshot(job, previousState)
-        this.recordJobEvent(job, type, {
-          previousState: previousState !== job.state ? previousState : undefined,
-        })
+        if (shouldDebugTrackedEvent(type, previousState, job.state)) {
+          this.recordJobEvent(job, type, {
+            previousState: previousState !== job.state ? previousState : undefined,
+          })
+        }
         break
       default:
+        await logIgnoredEvent("unhandled tracked child event", {}, {
+          persistInJobFeed: false,
+          touchUpdatedAt: false,
+          advanceSourceTimestamp: false,
+        })
         return
     }
 
@@ -547,6 +775,23 @@ export class MissionControlJobController {
     if (eventUpdatedAt !== undefined) {
       job.lastSourceUpdatedAt = Math.max(job.lastSourceUpdatedAt ?? Number.NEGATIVE_INFINITY, eventUpdatedAt)
     }
+
+    if (shouldDebugTrackedEvent(type, previousState, job.state)) {
+      await this.debugJob(adapter, "handleEvent updated tracked child event", job, {
+        eventType: type,
+        eventSessionId: sessionID,
+        eventUpdatedAt,
+        requestId: requestID,
+        sessionStatus: extractedSessionStatus,
+        previousState,
+        nextState: job.state,
+        pendingInputKind: job.pendingInput?.kind,
+        pendingRequestId: job.pendingInput?.requestId,
+        lastResolvedPendingKind: job.lastResolvedPendingKind,
+        lastResolvedPendingRequestId: job.lastResolvedPendingRequestID,
+      })
+    }
+
     await this.persist()
   }
 
@@ -598,8 +843,16 @@ export class MissionControlJobController {
       return fail("JobLaunchFailed", "Progress updates require a non-blank message.")
     }
 
-    const callerSessionID = caller.sessionId?.trim()
+    const callerSessionID = await this.resolveCallerSessionID(adapter, caller)
     if (!callerSessionID) {
+      await adapter.debug("updateProgress could not resolve caller child session", {
+        requestedJobId: args.jobId,
+        callerSessionId: caller.sessionId,
+        callerMessageId: caller.messageId,
+        callerDirectory: caller.directory,
+        callerWorktree: caller.worktree,
+      })
+
       return fail(
         "CurrentSessionUnavailable",
         "Mission Control could not identify the caller child session for this progress update.",
@@ -609,10 +862,21 @@ export class MissionControlJobController {
 
     const job = args.jobId ? this.jobs.get(args.jobId) : this.jobForChildSession(callerSessionID)
     if (!job) {
+      await adapter.debug("updateProgress could not find tracked job", {
+        requestedJobId: args.jobId,
+        callerSessionId: callerSessionID,
+      })
+
       return fail("JobNotFound", `No tracked background job matches '${args.jobId ?? callerSessionID}'.`)
     }
 
     if (job.childSessionID !== callerSessionID) {
+      await adapter.debug("updateProgress caller child session did not match tracked child session", {
+        jobId: job.jobID,
+        callerSessionId: callerSessionID,
+        trackedChildSessionId: job.childSessionID,
+      })
+
       return fail(
         "JobLaunchFailed",
         `Job '${job.jobID}' only accepts progress updates from its tracked child session.`,
@@ -653,7 +917,13 @@ export class MissionControlJobController {
 
     try {
       await this.persist()
-    } catch {
+    } catch (error) {
+      await adapter.debug("updateProgress failed to persist job state", {
+        jobId: job.jobID,
+        state: job.state,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
       return ok({
         job: toPublicJob(job),
         event: toPublicJobEvent(event),
@@ -672,9 +942,9 @@ export class MissionControlJobController {
       return fail("JobNotFound", `Job '${args.jobId}' was not found.`)
     }
 
-    const callerFailure = this.validateParentCaller(job, caller)
-    if (callerFailure) {
-      return callerFailure
+    const validatedParentSessionID = await this.validateParentCaller(adapter, job, caller)
+    if (typeof validatedParentSessionID !== "string") {
+      return validatedParentSessionID
     }
 
     const pendingInput = job.pendingInput
@@ -693,7 +963,21 @@ export class MissionControlJobController {
       )
     }
 
+    const localPermissionReplyProvenance = this.rememberLocalPermissionReply(
+      job,
+      pendingInput.requestId,
+      args.reply,
+      validatedParentSessionID,
+      caller.messageId?.trim() || undefined,
+    )
+
     try {
+      await this.debugJob(adapter, "replyPermission sending permission reply", job, {
+        requestId: pendingInput.requestId,
+        reply: args.reply,
+        callerSessionId: validatedParentSessionID,
+        callerMessageId: caller.messageId,
+      })
       await adapter.replyPermissionRequest(
         pendingInput.requestId,
         args.reply,
@@ -701,11 +985,21 @@ export class MissionControlJobController {
         job.childDirectory ?? job.parentDirectory,
       )
     } catch (error) {
+      this.forgetLocalPermissionReply(pendingInput.requestId)
       return fail(
         "JobBlockedOnPermission",
         `Failed to reply to the permission request for job '${job.jobID}'.`,
         error instanceof Error ? error.message : undefined,
       )
+    }
+
+    if (isResolvedPendingRequest(job, "permission", pendingInput.requestId)) {
+      await this.debugJob(adapter, "replyPermission observed already-resolved permission request", job, {
+        requestId: pendingInput.requestId,
+        reply: args.reply,
+      })
+
+      return ok(toPublicJob(job))
     }
 
     const previousState = job.state
@@ -718,15 +1012,20 @@ export class MissionControlJobController {
     this.recordJobEvent(job, "permission.replied", {
       previousState,
       detail: `Parent replied '${args.reply}' to the permission request.`,
-      metadata: {
-        requestId: pendingInput.requestId,
-        reply: args.reply,
-        ...(args.message ? { message: args.message } : {}),
-      },
+      metadata: buildPermissionReplyMetadata(pendingInput.requestId, localPermissionReplyProvenance, {
+        message: args.message,
+      }),
     })
     try {
       await this.persist()
-    } catch {
+    } catch (error) {
+      await adapter.debug("replyPermission failed to persist job state", {
+        jobId: job.jobID,
+        state: job.state,
+        requestId: pendingInput.requestId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
       return ok(toPublicJob(job))
     }
     return ok(toPublicJob(job))
@@ -738,9 +1037,9 @@ export class MissionControlJobController {
       return fail("JobNotFound", `Job '${args.jobId}' was not found.`)
     }
 
-    const callerFailure = this.validateParentCaller(job, caller)
-    if (callerFailure) {
-      return callerFailure
+    const validatedParentSessionID = await this.validateParentCaller(adapter, job, caller)
+    if (typeof validatedParentSessionID !== "string") {
+      return validatedParentSessionID
     }
 
     const pendingInput = job.pendingInput
@@ -782,11 +1081,19 @@ export class MissionControlJobController {
       metadata: {
         requestId: pendingInput.requestId,
         answers: args.answers,
+        callerSessionId: validatedParentSessionID,
       },
     })
     try {
       await this.persist()
-    } catch {
+    } catch (error) {
+      await adapter.debug("replyQuestion failed to persist job state", {
+        jobId: job.jobID,
+        state: job.state,
+        requestId: pendingInput.requestId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
       return ok(toPublicJob(job))
     }
     return ok(toPublicJob(job))
@@ -798,9 +1105,9 @@ export class MissionControlJobController {
       return fail("JobNotFound", `Job '${jobID}' was not found.`)
     }
 
-    const callerFailure = this.validateParentCaller(job, caller)
-    if (callerFailure) {
-      return callerFailure
+    const validatedParentSessionID = await this.validateParentCaller(adapter, job, caller)
+    if (typeof validatedParentSessionID !== "string") {
+      return validatedParentSessionID
     }
 
     const pendingInput = job.pendingInput
@@ -843,6 +1150,7 @@ export class MissionControlJobController {
       detail: job.failureReason,
       metadata: {
         requestId: pendingInput.requestId,
+        callerSessionId: validatedParentSessionID,
       },
     })
     try {
@@ -853,7 +1161,14 @@ export class MissionControlJobController {
         return ok(toPublicJob(job))
       }
       await this.persist()
-    } catch {
+    } catch (error) {
+      await adapter.debug("rejectQuestion failed during finalization", {
+        jobId: job.jobID,
+        state: job.state,
+        requestId: pendingInput.requestId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
       return ok(toPublicJob(job))
     }
     return ok(toPublicJob(job))
@@ -865,9 +1180,9 @@ export class MissionControlJobController {
       return fail("JobNotFound", `Job '${jobID}' was not found.`)
     }
 
-    const callerFailure = this.validateParentCaller(job, caller)
-    if (callerFailure) {
-      return callerFailure
+    const validatedParentSessionID = await this.validateParentCaller(adapter, job, caller)
+    if (typeof validatedParentSessionID !== "string") {
+      return validatedParentSessionID
     }
 
     if (isClosedJobState(job.state)) {
@@ -915,7 +1230,13 @@ export class MissionControlJobController {
         return ok(toPublicJob(job))
       }
       await this.persist()
-    } catch {
+    } catch (error) {
+      await adapter.debug("cancelJob failed during finalization", {
+        jobId: job.jobID,
+        state: job.state,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
       return ok(toPublicJob(job))
     }
     return ok(toPublicJob(job))
@@ -955,9 +1276,9 @@ export class MissionControlJobController {
           `The current OpenCode runtime cannot relay job '${jobID}' results back to the parent session.`,
         )
       }
-      const callerFailure = this.validateParentCaller(job, caller)
-      if (callerFailure) {
-        return callerFailure
+      const callerValidation = await this.validateParentCaller(adapter, job, caller)
+      if (typeof callerValidation !== "string") {
+        return callerValidation
       }
       const relayResult = await this.relayResult(adapter, jobID, { force: true })
       if (!relayResult.ok) {
@@ -1005,6 +1326,12 @@ export class MissionControlJobController {
       })
     }
 
+    await this.debugJob(adapter, "relayResult delivering stored snapshot", job, {
+      force: Boolean(options.force),
+      snapshotState: result.state,
+      keyMessageCount: result.keyMessageIDs.length,
+    })
+
     try {
       await deliverParentRelay(adapter, job, result)
       const previousState = job.state
@@ -1019,12 +1346,26 @@ export class MissionControlJobController {
       this.recordJobEvent(job, job.lastObservedEvent, {
         previousState: previousState !== job.state ? previousState : undefined,
       })
+
+      await this.debugJob(adapter, "relayResult delivered stored snapshot", job, {
+        force: Boolean(options.force),
+        previousState,
+        nextState: job.state,
+        snapshotState: result.state,
+      })
+
       await this.persist()
       return ok({
         job,
         result,
       })
-    } catch {
+    } catch (error) {
+      await this.debugJob(adapter, "relayResult failed to deliver stored snapshot", job, {
+        force: Boolean(options.force),
+        snapshotState: result.state,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
       if (job.relayState === "delivered") {
         return fail(
           "JobLaunchFailed",
@@ -1036,7 +1377,9 @@ export class MissionControlJobController {
       job.relayState = "failed"
       job.updatedAt = Date.now()
       job.lastObservedEvent = "job.relay_failed"
-      this.recordJobEvent(job, "job.relay_failed")
+      this.recordJobEvent(job, "job.relay_failed", {
+        detail: error instanceof Error ? error.message : "Failed to relay the result to the parent session.",
+      })
       await this.persist()
       return fail(
         "JobLaunchFailed",
@@ -1051,9 +1394,42 @@ export class MissionControlJobController {
     return jobID ? this.jobs.get(jobID) : undefined
   }
 
-  private validateParentCaller(job: BackgroundJob, caller: ToolCallerContext) {
-    const callerSessionID = caller.sessionId?.trim()
+  private async resolveCallerSessionID(adapter: OpenCodeAdapter, caller: ToolCallerContext) {
+    if (!caller.messageId?.trim()) {
+      await adapter.debug("resolveCallerSessionID using raw caller session without message verification", {
+        callerSessionId: caller.sessionId,
+      })
+
+      return caller.sessionId?.trim()
+    }
+
+    const resolvedCaller = await adapter.resolveCallerSession(caller)
+    if (resolvedCaller?.sessionID) {
+      await adapter.debug("resolveCallerSessionID resolved caller from message", {
+        callerSessionId: caller.sessionId,
+        callerMessageId: caller.messageId,
+        resolvedSessionId: resolvedCaller.sessionID,
+      })
+    } else {
+      await adapter.debug("resolveCallerSessionID could not resolve caller from message", {
+        callerSessionId: caller.sessionId,
+        callerMessageId: caller.messageId,
+      })
+    }
+
+    return resolvedCaller?.sessionID
+  }
+
+  private async validateParentCaller(adapter: OpenCodeAdapter, job: BackgroundJob, caller: ToolCallerContext) {
+    const callerSessionID = await this.resolveCallerSessionID(adapter, caller)
     if (!callerSessionID) {
+      await adapter.debug("validateParentCaller could not resolve caller parent session", {
+        jobId: job.jobID,
+        expectedParentSessionId: job.parentSessionID,
+        callerSessionId: caller.sessionId,
+        callerMessageId: caller.messageId,
+      })
+
       return fail(
         "CurrentSessionUnavailable",
         `Mission Control could not verify the parent session for job '${job.jobID}'.`,
@@ -1062,6 +1438,13 @@ export class MissionControlJobController {
     }
 
     if (callerSessionID !== job.parentSessionID) {
+      await adapter.debug("validateParentCaller rejected mismatched parent session", {
+        jobId: job.jobID,
+        expectedParentSessionId: job.parentSessionID,
+        callerSessionId: callerSessionID,
+        callerMessageId: caller.messageId,
+      })
+
       return fail(
         "JobLaunchFailed",
         `Only parent session '${job.parentSessionID}' can perform parent-scoped actions for job '${job.jobID}'.`,
@@ -1069,7 +1452,7 @@ export class MissionControlJobController {
       )
     }
 
-    return undefined
+    return callerSessionID
   }
 
   private async resolvePendingPermissionRequest(
@@ -1142,6 +1525,10 @@ export class MissionControlJobController {
 
     let snapshot: JobResultSnapshot
 
+    await this.debugJob(adapter, "captureResult reading child transcript", job, {
+      childDirectory: job.childDirectory,
+    })
+
     try {
       const messages = await adapter.getSessionMessages(job.childSessionID, job.childDirectory)
       const lastMessage = [...messages]
@@ -1163,7 +1550,7 @@ export class MissionControlJobController {
         keyMessageIDs: keyMessageID ? [keyMessageID] : [],
         observedAt: Date.now(),
       }
-    } catch {
+    } catch (error) {
       snapshot = {
         jobID: job.jobID,
         childSessionID: job.childSessionID,
@@ -1175,9 +1562,21 @@ export class MissionControlJobController {
         keyMessageIDs: [],
         observedAt: Date.now(),
       }
+
+      await this.debugJob(adapter, "captureResult transcript capture failed", job, {
+        error: error instanceof Error ? error.message : String(error),
+      })
     }
 
     this.results.set(job.jobID, snapshot)
+
+    await this.debugJob(adapter, "captureResult stored snapshot", job, {
+      snapshotState: snapshot.state,
+      keyMessageCount: snapshot.keyMessageIDs.length,
+      blockersCount: snapshot.blockers.length,
+      summaryLength: snapshot.summary.length,
+    })
+
     await this.persist()
     return snapshot
   }
@@ -1256,6 +1655,11 @@ export class MissionControlJobController {
     job.state = "idle"
     this.recordJobEvent(job, eventType, { previousState })
 
+    await this.debugJob(adapter, "handleIdleTransition finalizing idle job", job, {
+      previousState,
+      eventType,
+    })
+
     await this.captureResult(adapter, job)
     await this.relayResult(adapter, job.jobID)
   }
@@ -1314,6 +1718,99 @@ export class MissionControlJobController {
     }
   }
 
+  private rememberLocalPermissionReply(
+    job: BackgroundJob,
+    requestId: string,
+    reply: JobPermissionReplyArgs["reply"],
+    callerSessionId: string,
+    callerMessageId?: string,
+  ): PermissionReplyProvenance {
+    const provenance: PermissionReplyProvenance = {
+      source: "mission_control_local_reply",
+      jobId: job.jobID,
+      parentSessionId: job.parentSessionID,
+      reply,
+      initiatedAt: Date.now(),
+      callerSessionId,
+      callerMessageId,
+    }
+
+    this.pruneRecentLocalPermissionReplies()
+    this.recentLocalPermissionReplies.set(requestId, {
+      jobId: provenance.jobId,
+      parentSessionId: provenance.parentSessionId,
+      reply: provenance.reply,
+      initiatedAt: provenance.initiatedAt,
+      callerSessionId: provenance.callerSessionId,
+      callerMessageId: provenance.callerMessageId,
+    })
+
+    return provenance
+  }
+
+  private forgetLocalPermissionReply(requestId?: string) {
+    if (!requestId) {
+      return
+    }
+
+    this.recentLocalPermissionReplies.delete(requestId)
+  }
+
+  private consumePermissionReplyProvenance(requestId?: string): PermissionReplyProvenance {
+    this.pruneRecentLocalPermissionReplies()
+
+    if (!requestId) {
+      return {
+        source: "external_unknown_reply",
+      }
+    }
+
+    const intent = this.recentLocalPermissionReplies.get(requestId)
+    if (!intent) {
+      return {
+        source: "external_unknown_reply",
+      }
+    }
+
+    this.recentLocalPermissionReplies.delete(requestId)
+    return {
+      source: "mission_control_local_reply",
+      jobId: intent.jobId,
+      parentSessionId: intent.parentSessionId,
+      reply: intent.reply,
+      initiatedAt: intent.initiatedAt,
+      callerSessionId: intent.callerSessionId,
+      callerMessageId: intent.callerMessageId,
+    }
+  }
+
+  private pruneRecentLocalPermissionReplies(now = Date.now()) {
+    for (const [requestId, intent] of this.recentLocalPermissionReplies.entries()) {
+      if (now - intent.initiatedAt > MissionControlJobController.LOCAL_PERMISSION_REPLY_TTL_MS) {
+        this.recentLocalPermissionReplies.delete(requestId)
+      }
+    }
+  }
+
+  private async debugJob(
+    adapter: OpenCodeAdapter,
+    message: string,
+    job: BackgroundJob,
+    extra: Record<string, unknown> = {},
+  ) {
+    await adapter.debug(message, {
+      jobId: job.jobID,
+      title: job.title,
+      parentSessionId: job.parentSessionID,
+      childSessionId: job.childSessionID,
+      state: job.state,
+      lastObservedEvent: job.lastObservedEvent,
+      relayState: job.relayState,
+      pendingInputKind: job.pendingInput?.kind,
+      ...extra,
+    })
+  }
+
   private recordJobEvent(
     job: BackgroundJob,
     type: string,
@@ -1348,9 +1845,6 @@ export class MissionControlJobController {
   }
 }
 
-const createJobID = () => `job-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-const createJobEventID = (jobID: string) => `${jobID}-evt-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-
 const getMissionControlCacheRoot = (rootDir: string) => {
   const xdgCache = process.env.XDG_CACHE_HOME?.trim()
   const home = process.env.HOME?.trim() || homedir()
@@ -1359,344 +1853,3 @@ const getMissionControlCacheRoot = (rootDir: string) => {
 }
 
 const scopeKey = (rootDir: string) => createHash("sha1").update(rootDir || "default").digest("hex").slice(0, 16)
-
-const mapJobStateToSnapshotState = (state: BackgroundJob["state"]): JobResultSnapshot["state"] => {
-  switch (state) {
-    case "failed":
-      return "failed"
-    case "aborted":
-      return "aborted"
-    case "completed":
-      return "completed"
-    default:
-      return "idle"
-  }
-}
-
-const collectMessagePartsText = (parts: any[]) => {
-  const text = parts
-    .map((part) => {
-      if (typeof part?.text === "string") {
-        return part.text
-      }
-
-      if (part?.state && typeof part.state === "object") {
-        if (typeof part.state.output === "string") {
-          return part.state.output
-        }
-
-        if (typeof part.state.error === "string") {
-          return part.state.error
-        }
-      }
-
-      return ""
-    })
-    .filter(Boolean)
-    .join("\n")
-    .trim()
-
-  return text.length > 0 ? text : ""
-}
-
-const truncateSummary = (text: string | undefined) => {
-  if (!text) {
-    return ""
-  }
-
-  return text.length > 0 ? text.slice(0, 1200) : ""
-}
-
-const defaultSummaryForState = (job: BackgroundJob) => {
-  if (job.failureReason) {
-    return job.failureReason
-  }
-
-  switch (job.state) {
-    case "waiting_permission":
-      return job.pendingInput?.kind === "permission"
-        ? `The child session is waiting on a permission decision for '${job.pendingInput.permission}'.`
-        : "The child session is waiting on a permission decision."
-    case "waiting_question":
-      return job.pendingInput?.kind === "question" && job.pendingInput.questions[0]
-        ? `The child session is waiting on an answer for '${job.pendingInput.questions[0].header}'.`
-        : "The child session is waiting on an answered question."
-    case "aborted":
-      return "The job was aborted before completion."
-    default:
-      return "The child session reached a stable state without a richer final summary yet."
-  }
-}
-
-const collectBlockers = (job: BackgroundJob) => {
-  const blockers: string[] = []
-
-  if (job.state === "waiting_permission") {
-    blockers.push(
-      job.pendingInput?.kind === "permission"
-        ? `Waiting on permission approval for '${job.pendingInput.permission}'`
-        : "Waiting on permission approval",
-    )
-  }
-
-  if (job.state === "waiting_question") {
-    blockers.push(
-      job.pendingInput?.kind === "question" && job.pendingInput.questions[0]
-        ? `Waiting on question response for '${job.pendingInput.questions[0].header}'`
-        : "Waiting on a question response",
-    )
-  }
-
-  if (job.failureReason) {
-    blockers.push(job.failureReason)
-  }
-
-  return blockers
-}
-
-const mergeBlockers = (job: BackgroundJob, reportedBlockers: string[]) => {
-  return Array.from(new Set([...collectBlockers(job), ...reportedBlockers]))
-}
-
-const normalizeLoadedJob = (job: BackgroundJob, _config: MissionControlConfig): BackgroundJob => {
-  return {
-    ...job,
-    relayState: (job.relayState as string) === "not_requested" ? "pending" : (job.relayState ?? "pending"),
-    lastSourceUpdatedAt: job.lastSourceUpdatedAt,
-    pendingInput: job.pendingInput,
-    lastResolvedPendingKind: job.lastResolvedPendingKind,
-    lastResolvedPendingRequestID: job.lastResolvedPendingRequestID,
-  }
-}
-
-const toPublicJob = (job: BackgroundJob): MissionControlJob => ({
-  jobId: job.jobID,
-  sessionId: job.parentSessionID,
-  parentDirectory: job.parentDirectory,
-  childSessionId: job.childSessionID,
-  childDirectory: job.childDirectory,
-  title: job.title,
-  prompt: job.prompt,
-  state: job.state,
-  createdAt: job.createdAt,
-  updatedAt: job.updatedAt,
-  launchedAt: job.launchedAt,
-  completedAt: job.completedAt,
-  failureReason: job.failureReason,
-  lastObservedEvent: job.lastObservedEvent,
-  lastSourceUpdatedAt: job.lastSourceUpdatedAt,
-  relayState: job.relayState,
-  pendingInput: job.pendingInput,
-})
-
-const toPublicJobResult = (result: JobResultSnapshot | undefined): MissionControlJobResult | undefined =>
-  result
-    ? {
-        jobId: result.jobID,
-        childSessionId: result.childSessionID,
-        state: result.state,
-        headline: result.headline,
-        summary: result.summary,
-        blockers: result.blockers,
-        recommendedNextStep: result.recommendedNextStep,
-        keyMessageIds: result.keyMessageIDs,
-        observedAt: result.observedAt,
-      }
-    : undefined
-
-const toPublicJobEvent = (event: JobLifecycleEvent): MissionControlJobEvent => ({
-  eventId: event.eventID,
-  jobId: event.jobID,
-  sessionId: event.parentSessionID,
-  childSessionId: event.childSessionID,
-  type: event.type,
-  state: event.state,
-  previousState: event.previousState,
-  at: event.at,
-  detail: event.detail,
-  metadata: event.metadata,
-})
-
-const toPendingPermissionRequest = (value: unknown): JobPendingPermissionRequest | undefined => {
-  const request = extractPermissionRequest(value)
-  if (!request) {
-    return undefined
-  }
-
-  return {
-    kind: "permission",
-    ...request,
-    askedAt: Date.now(),
-  }
-}
-
-const toPendingQuestionRequest = (value: unknown): JobPendingQuestionRequest | undefined => {
-  const request = extractQuestionRequest(value)
-  if (!request) {
-    return undefined
-  }
-
-  return {
-    kind: "question",
-    ...request,
-    askedAt: Date.now(),
-  }
-}
-
-const isSamePendingInput = (left: JobPendingInput | undefined, right: JobPendingInput | undefined) =>
-  Boolean(left && right && left.kind === right.kind && left.requestId === right.requestId)
-
-const clearPendingInput = (job: BackgroundJob, kind: PendingInputKind, requestID?: string) => {
-  if (!job.pendingInput || job.pendingInput.kind !== kind) {
-    return
-  }
-
-  if (requestID && job.pendingInput.requestId !== requestID) {
-    return
-  }
-
-  job.pendingInput = undefined
-}
-
-const isResolvedPendingRequest = (job: BackgroundJob, kind: PendingInputKind, requestID: string) =>
-  !job.pendingInput && job.lastResolvedPendingKind === kind && job.lastResolvedPendingRequestID === requestID
-
-const hasMismatchedPendingRequest = (job: BackgroundJob, kind: PendingInputKind, requestID?: string) => {
-  if (!job.pendingInput) {
-    return false
-  }
-
-  if (job.pendingInput.kind !== kind) {
-    return true
-  }
-
-  return Boolean(requestID && job.pendingInput.requestId !== requestID)
-}
-
-const hasConflictingPendingInput = (job: BackgroundJob, pendingInput: JobPendingInput) =>
-  Boolean(job.pendingInput && job.pendingInput.requestId !== pendingInput.requestId)
-
-const describePendingInput = (pendingInput: JobPendingInput | undefined) => {
-  if (!pendingInput) {
-    return undefined
-  }
-
-  if (pendingInput.kind === "permission") {
-    return `Waiting on permission '${pendingInput.permission}'.`
-  }
-
-  const firstQuestion = pendingInput.questions[0]?.header || pendingInput.questions[0]?.question
-  return firstQuestion ? `Waiting on question '${firstQuestion}'.` : "Waiting on a question response."
-}
-
-const parseStructuredFinalReport = (text: string) => {
-  const sections: Record<string, string[]> = {}
-  let currentSection: string | undefined
-
-  for (const rawLine of text.split(/\r?\n/)) {
-    const line = rawLine.trim()
-    const matchedHeading = matchStructuredHeading(line)
-    if (matchedHeading) {
-      currentSection = matchedHeading.section
-      sections[currentSection] ??= []
-      if (matchedHeading.remainder) {
-        sections[currentSection].push(matchedHeading.remainder)
-      }
-      continue
-    }
-
-    if (!currentSection || !line) {
-      continue
-    }
-
-    sections[currentSection] ??= []
-    sections[currentSection].push(line)
-  }
-
-  return {
-    summary: joinStructuredSection(sections.summary),
-    keyFindings: joinStructuredSection(sections.keyFindings),
-    blockers: normalizeStructuredBlockers(joinStructuredSection(sections.blockers)),
-    recommendedNextStep: joinStructuredSection(sections.recommendedNextStep),
-  }
-}
-
-const buildStructuredSummary = (report: {
-  summary?: string
-  keyFindings?: string
-}) => {
-  const segments = [report.summary]
-
-  if (report.keyFindings) {
-    segments.push(`Key Findings:\n${report.keyFindings}`)
-  }
-
-  const summary = segments.filter(Boolean).join("\n\n").trim()
-  return summary ? summary : undefined
-}
-
-const matchStructuredHeading = (line: string) => {
-  const match = /^(?:[-*#]+\s*)?(Status|Summary|Key Findings|Blockers|Recommended Next Step)\s*:?[ \t]*(.*)$/i.exec(
-    line,
-  )
-  if (!match) {
-    return undefined
-  }
-
-  const heading = match[1]?.toLowerCase()
-  const remainder = match[2]?.trim()
-  const section =
-    heading === "recommended next step"
-      ? "recommendedNextStep"
-      : heading === "key findings"
-        ? "keyFindings"
-        : heading
-
-  return {
-    section,
-    remainder,
-  }
-}
-
-const joinStructuredSection = (lines: string[] | undefined) => {
-  const value = lines?.join("\n").trim()
-  return value ? value : undefined
-}
-
-const normalizeStructuredBlockers = (blockers: string | undefined) => {
-  if (!blockers) {
-    return []
-  }
-
-  if (/^none\.?$/i.test(blockers)) {
-    return []
-  }
-
-  const entries = blockers
-    .split(/\n|;|•|^- /gm)
-    .map((entry) => entry.trim())
-    .filter(Boolean)
-    .map((entry) => entry.replace(/^[-*]\s*/, ""))
-    .filter(Boolean)
-
-  if (entries.every((entry) => /^none\.?$/i.test(entry))) {
-    return []
-  }
-
-  return entries
-}
-
-const isStableResultState = (state: BackgroundJob["state"]) =>
-  ["idle", "completed", "failed", "aborted"].includes(state)
-
-const canExposeStoredResult = (state: BackgroundJob["state"], hasStoredResult: boolean) =>
-  isStableResultState(state) || (state === "orphaned" && hasStoredResult)
-
-const isClosedJobState = (state: BackgroundJob["state"]) =>
-  ["completed", "failed", "aborted", "orphaned"].includes(state)
-
-const isRecoverableJobState = (state: BackgroundJob["state"]) =>
-  ["queued", "launching", "running", "waiting_permission", "waiting_question"].includes(state)
-
-const isLiveTrackedJobState = (state: BackgroundJob["state"]) =>
-  ["queued", "launching", "running", "waiting_permission", "waiting_question"].includes(state)

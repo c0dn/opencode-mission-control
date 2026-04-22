@@ -101,6 +101,73 @@ describe("mc_session_read tool", () => {
 })
 
 describe("job tools", () => {
+  test("mc_job_start forwards caller session and message context", async () => {
+    const calls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async startJob(args: unknown, caller: unknown) {
+        calls.push({ args, caller })
+        return {
+          ok: true,
+          data: {
+            jobId: "job_123",
+            sessionId: "ses_parent",
+            childSessionId: "ses_child",
+            state: "running",
+          },
+        }
+      },
+    } as any)
+
+    await tools.mc_job_start.execute(
+      {
+        prompt: "Do work",
+        title: "Background work",
+      } as any,
+      {
+        sessionID: "parent-session",
+        messageID: "message-1",
+        directory: "/tmp/project",
+        worktree: "/tmp/project",
+      } as any,
+    )
+
+    expect(calls).toEqual([
+      {
+        args: {
+          prompt: "Do work",
+          title: "Background work",
+        },
+        caller: {
+          sessionId: "parent-session",
+          messageId: "message-1",
+          directory: "/tmp/project",
+          worktree: "/tmp/project",
+        },
+      },
+    ])
+  })
+
+  test("mc_job_start no longer exposes sessionId in its public tool args", () => {
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async startJob() {
+        return {
+          ok: true,
+          data: {
+            jobId: "job_123",
+            sessionId: "ses_parent",
+            childSessionId: "ses_child",
+            state: "running",
+          },
+        }
+      },
+    } as any)
+
+    expect((tools.mc_job_start as any).args.sessionId).toBeUndefined()
+  })
+
   test("mc_job_events forwards the public args unchanged", async () => {
     const calls: unknown[] = []
 
@@ -165,6 +232,7 @@ describe("job tools", () => {
       } as any,
       {
         sessionID: "child-session",
+        messageID: "message-1",
         directory: "/tmp/project",
         worktree: "/tmp/project",
       } as any,
@@ -180,6 +248,7 @@ describe("job tools", () => {
         },
         caller: {
           sessionId: "child-session",
+          messageId: "message-1",
           directory: "/tmp/project",
           worktree: "/tmp/project",
         },

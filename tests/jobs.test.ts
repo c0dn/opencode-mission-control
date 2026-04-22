@@ -51,7 +51,9 @@ describe("MissionControl background jobs launch and attachment", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Status idle finalize",
       prompt: "Finalize from session.status idle.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)

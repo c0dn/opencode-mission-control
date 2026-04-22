@@ -24,12 +24,12 @@ describe("MissionControl background jobs blocked input - question", () => {
         async create() {
           return { id: "child-question", directory }
         },
-        async promptAsync() {
+        async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+          if (input.body?.noReply) {
+            parentMessages.push(input.body.parts?.[0]?.text ?? "")
+          }
+
           return undefined
-        },
-        async prompt(input: { body: { parts?: Array<{ text?: string }> } }) {
-          parentMessages.push(input.body.parts?.[0]?.text ?? "")
-          return true
         },
         async messages() {
           return []
@@ -48,7 +48,9 @@ describe("MissionControl background jobs blocked input - question", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Question blocked",
       prompt: "Ask before reviewing the last files.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -145,7 +147,9 @@ describe("MissionControl background jobs blocked input - question", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Question reply",
       prompt: "Wait for the parent answer before continuing.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -242,7 +246,9 @@ describe("MissionControl background jobs blocked input - question", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Question reject",
       prompt: "Fail if the parent rejects the question.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -319,7 +325,9 @@ describe("MissionControl background jobs blocked input - question", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Stale question reply",
       prompt: "Keep the newest pending question active.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -384,7 +392,9 @@ describe("MissionControl background jobs blocked input - question", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Ignore conflicting ask replay",
       prompt: "Keep the currently pending question stable.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -414,5 +424,24 @@ describe("MissionControl background jobs blocked input - question", () => {
       kind: "question",
       requestId: "question-current",
     })
+
+    const events = controller.jobEvents(launchResult.data.jobId, 20)
+    expect(events.ok).toBe(true)
+    if (!events.ok) {
+      throw new Error("Expected conflicting-ask job events to exist")
+    }
+
+    expect(events.data.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "job.event_ignored",
+          detail: "conflicting question request",
+          metadata: expect.objectContaining({
+            eventType: "question.asked",
+            ignoredRequestId: "question-stale",
+          }),
+        }),
+      ]),
+    )
   })
 })

@@ -31,24 +31,21 @@ describe("createMissionControlConfig", () => {
     expect(config.safety.autoAnswerQuestions).toBe(false)
   })
 
-  test("forces ambiguous auto-attach safety on even when overrides try to disable it", () => {
+  test("merges debug logging overrides without enabling them by default", () => {
+    const defaultConfig = createMissionControlConfig()
+    expect(defaultConfig.debug.enabled).toBe(false)
+
     const config = createMissionControlConfig({
-      safety: {
-        requireExplicitParentOnAmbiguousAttach: false,
+      debug: {
+        enabled: true,
+        filePath: "/tmp/mission-control-debug.jsonl",
       },
     })
 
-    expect(config.safety.requireExplicitParentOnAmbiguousAttach).toBe(true)
-  })
-
-  test("forces caller-session auto-attach on in v2", () => {
-    const config = createMissionControlConfig({
-      jobs: {
-        autoAttachToCurrentSession: false,
-      },
+    expect(config.debug).toEqual({
+      enabled: true,
+      filePath: "/tmp/mission-control-debug.jsonl",
     })
-
-    expect(config.jobs.autoAttachToCurrentSession).toBe(true)
   })
 
 })

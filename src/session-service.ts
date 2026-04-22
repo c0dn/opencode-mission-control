@@ -33,6 +33,13 @@ export class MissionControlSessionService {
         directory: resolved.directory ?? extractDirectory(resolved.session),
       })
     } catch {
+      await adapter.debug("readSession failed to resolve session", {
+        sessionId,
+        withChildren: Boolean(options.withChildren),
+        withToolOutputs: Boolean(options.withToolOutputs),
+        limit: options.limit,
+      })
+
       return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
     }
 
@@ -51,6 +58,11 @@ export class MissionControlSessionService {
           }
         }
       } catch {
+        await adapter.debug("readSession failed to load child sessions", {
+          sessionId,
+          directory: relatedSessions[0]?.directory,
+        })
+
         return fail(
           "CurrentSessionUnavailable",
           `Failed to load child sessions for '${sessionId}'.`,
@@ -72,6 +84,12 @@ export class MissionControlSessionService {
           })
         }
       } catch {
+        await adapter.debug("readSession failed to load session messages", {
+          sessionId,
+          relatedSessionId: relatedSession.sessionID,
+          directory: relatedSession.directory,
+        })
+
         return fail(
           "CurrentSessionUnavailable",
           `Failed to load messages for session '${relatedSession.sessionID}'.`,
@@ -118,6 +136,12 @@ export class MissionControlSessionService {
         )
         return ok(node)
       } catch {
+        await adapter.debug("sessionTree failed while building tree", {
+          sessionId,
+          depth,
+          directory: resolved.directory,
+        })
+
         return fail(
           "CurrentSessionUnavailable",
           `Failed to build the tree for session '${sessionId}'.`,
@@ -125,6 +149,11 @@ export class MissionControlSessionService {
         )
       }
     } catch {
+      await adapter.debug("sessionTree failed to resolve session", {
+        sessionId,
+        depth,
+      })
+
       return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
     }
   }
@@ -145,6 +174,12 @@ export class MissionControlSessionService {
       session = resolved.session
       sessionDirectory = resolved.directory ?? extractDirectory(resolved.session)
     } catch {
+      await adapter.debug("observeSession failed to resolve session", {
+        sessionId,
+        withChildren: Boolean(options.withChildren),
+        limit: options.limit,
+      })
+
       return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
     }
 
@@ -166,6 +201,11 @@ export class MissionControlSessionService {
           }
         })
       } catch {
+        await adapter.debug("observeSession failed to load child sessions", {
+          sessionId,
+          directory: sessionDirectory,
+        })
+
         return fail(
           "CurrentSessionUnavailable",
           `Failed to load child sessions for '${sessionId}'.`,

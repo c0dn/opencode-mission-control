@@ -62,7 +62,10 @@ export class MissionControlServer {
     this.context = context
     this.config = config
     this.secrets = secrets
-    this.adapter = new OpenCodeAdapter(context.client)
+    this.adapter = new OpenCodeAdapter(context.client, {
+      rootDir,
+      debug: config.debug,
+    })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState = new MissionControlRuntimeState(config.observe.eventBufferSize)
     this.sourceDB = new MissionControlSourceDB()
@@ -100,7 +103,10 @@ export class MissionControlServer {
     this.context = context
     this.config = config
     this.secrets = secrets
-    this.adapter = new OpenCodeAdapter(context.client)
+    this.adapter = new OpenCodeAdapter(context.client, {
+      rootDir,
+      debug: config.debug,
+    })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState.setBufferSize(config.observe.eventBufferSize)
     this.jobController.rebind(rootDir, config)
@@ -135,6 +141,12 @@ export class MissionControlServer {
         },
       )
     }
+    await adapter.debug("Mission Control server started", {
+      directory: this.context.directory,
+      worktree: this.context.worktree,
+      debugFileEnabled: this.config.debug.enabled,
+      jobsEnabled: this.config.jobs.enabled,
+    })
     await adapter.log("info", "Mission Control plugin initialized", {
       directory: this.context.directory,
       worktree: this.context.worktree,

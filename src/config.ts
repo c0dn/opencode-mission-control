@@ -27,15 +27,15 @@ export const DEFAULT_CONFIG: MissionControlConfig = {
   jobs: {
     enabled: true,
     maxConcurrent: 2,
-    autoAttachToCurrentSession: true,
-    allowLatestSessionFallback: false,
     titlePrefix: "Mission Control",
     keepChildSessionOnCompletion: true,
   },
   safety: {
-    requireExplicitParentOnAmbiguousAttach: true,
     autoApprovePermissions: false,
     autoAnswerQuestions: false,
+  },
+  debug: {
+    enabled: false,
   },
 }
 
@@ -54,14 +54,16 @@ export const createMissionControlConfig = (
     jobs: {
       ...DEFAULT_CONFIG.jobs,
       ...overrides.jobs,
-      autoAttachToCurrentSession: true,
     },
     safety: {
       ...DEFAULT_CONFIG.safety,
       ...overrides.safety,
-      requireExplicitParentOnAmbiguousAttach: true,
       autoApprovePermissions: false,
       autoAnswerQuestions: false,
+    },
+    debug: {
+      ...DEFAULT_CONFIG.debug,
+      ...overrides.debug,
     },
   }
 }
@@ -100,6 +102,7 @@ export const resolveMissionControlRuntime = (
     observe: options.observe,
     jobs: options.jobs,
     safety: options.safety,
+    debug: options.debug,
   })
 
   return {

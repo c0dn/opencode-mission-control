@@ -93,7 +93,6 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     description: "Launch a background child-session job",
     args: {
       prompt: tool.schema.string(),
-      sessionId: tool.schema.string().optional(),
       title: tool.schema.string().optional(),
     },
     async execute(args, context) {
@@ -101,11 +100,11 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
         await server.startJob(
           {
             prompt: args.prompt,
-            sessionId: args.sessionId,
             title: args.title,
           },
           {
             sessionId: context.sessionID,
+            messageId: context.messageID,
             directory: context.directory,
             worktree: context.worktree,
           },
@@ -183,6 +182,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
           },
           {
             sessionId: context.sessionID,
+            messageId: context.messageID,
             directory: context.directory,
             worktree: context.worktree,
           },
@@ -207,6 +207,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
           },
           {
             sessionId: context.sessionID,
+            messageId: context.messageID,
             directory: context.directory,
             worktree: context.worktree,
           },
@@ -229,6 +230,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
           },
           {
             sessionId: context.sessionID,
+            messageId: context.messageID,
             directory: context.directory,
             worktree: context.worktree,
           },
@@ -246,6 +248,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       return toPluginToolResult(
         await server.rejectJobQuestion(args.jobId, {
           sessionId: context.sessionID,
+          messageId: context.messageID,
           directory: context.directory,
           worktree: context.worktree,
         }),
@@ -262,6 +265,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       return toPluginToolResult(
         await server.cancelJob(args.jobId, {
           sessionId: context.sessionID,
+          messageId: context.messageID,
           directory: context.directory,
           worktree: context.worktree,
         }),
@@ -279,6 +283,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       return toPluginToolResult(
         await server.jobResult(args.jobId, args.sendToParent ?? false, {
           sessionId: context.sessionID,
+          messageId: context.messageID,
           directory: context.directory,
           worktree: context.worktree,
         }),

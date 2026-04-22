@@ -26,9 +26,6 @@ describe("MissionControl background job progress and event feed", () => {
         async promptAsync() {
           return undefined
         },
-        async prompt() {
-          return true
-        },
         async messages() {
           return []
         },
@@ -46,7 +43,9 @@ describe("MissionControl background job progress and event feed", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Job events",
       prompt: "Track progress updates.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
@@ -100,12 +99,11 @@ describe("MissionControl background job progress and event feed", () => {
           async create() {
             return { id: "child-progress", directory }
           },
-          async promptAsync() {
+          async promptAsync(input: { body?: { noReply?: boolean; parts?: Array<{ text?: string }> } }) {
+            if (input.body?.noReply) {
+              parentMessages.push(input.body.parts?.[0]?.text ?? "")
+            }
             return undefined
-          },
-          async prompt(input: { body: { parts?: Array<{ text?: string }> } }) {
-            parentMessages.push(input.body.parts?.[0]?.text ?? "")
-            return true
           },
           async messages() {
             return []
@@ -124,7 +122,9 @@ describe("MissionControl background job progress and event feed", () => {
       const launchResult = await launcher.launch(adapter, {
         title: "Progress updates",
         prompt: "Send checkpoints while working.",
+      }, {
         sessionId: "parent-session",
+        directory,
       })
 
       expect(launchResult.ok).toBe(true)
@@ -195,7 +195,9 @@ describe("MissionControl background job progress and event feed", () => {
     const launchResult = await launcher.launch(adapter, {
       title: "Wrong child progress",
       prompt: "Only the child session may update this job.",
+    }, {
       sessionId: "parent-session",
+      directory,
     })
 
     expect(launchResult.ok).toBe(true)
