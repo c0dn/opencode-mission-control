@@ -1,56 +1,33 @@
-import { createHash } from "node:crypto"
-import { appendFile, mkdir } from "node:fs/promises"
-import { homedir, tmpdir } from "node:os"
-import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path"
+import { DebugLogWriter, type OpenCodeAdapterOptions } from "./opencode/debug-log.js"
+import {
+  directoryQuery,
+  getRawClient,
+  isNoReplyParseError,
+  rawRequest,
+  unwrap,
+  withDirectoryQuery,
+  type UnknownRecord,
+} from "./opencode/raw-client.js"
+import {
+  GlobalSessionDiscoveryError,
+  findSessionOwningMessage,
+  resolveCallerSession,
+  resolveSession,
+} from "./opencode/session-resolution.js"
 
-import { extractDirectory, extractSessionID, extractSessionTimestamp } from "./session-extractors.js"
+import type { ToolCallerContext } from "./types.js"
 
-import type { MissionControlConfig, ToolCallerContext } from "./types.js"
-
-type MaybeData<T> = T | { data: T }
-
-type UnknownRecord = Record<string, unknown>
-type QueryInput = Record<string, unknown> & { query?: Record<string, unknown> }
-type RawOpenCodeClient = {
-  request: <TData = unknown>(options: {
-    method: string
-    url: string
-    query?: Record<string, unknown>
-    body?: unknown
-    signal?: AbortSignal
-    responseStyle?: "data" | "fields"
-    throwOnError?: boolean
-    parseAs?: "arrayBuffer" | "auto" | "blob" | "formData" | "json" | "stream" | "text"
-  }) => Promise<TData>
-}
-
-export class GlobalSessionDiscoveryError extends Error {
-  constructor(message = "Global session discovery is unavailable") {
-    super(message)
-    this.name = "GlobalSessionDiscoveryError"
-  }
-}
-
-type OpenCodeAdapterOptions = {
-  rootDir?: string
-  debug?: MissionControlConfig["debug"]
-}
-
-const unwrap = <T>(value: MaybeData<T>): T => {
-  if (value && typeof value === "object" && "data" in value) {
-    return (value as { data: T }).data
-  }
-
-  return value as T
-}
+export { GlobalSessionDiscoveryError } from "./opencode/session-resolution.js"
 
 export class OpenCodeAdapter {
-  private debugFileWriteFailed = false
+  private readonly debugLogWriter: DebugLogWriter
 
   constructor(
     private readonly client: any,
     private readonly options: OpenCodeAdapterOptions = {},
-  ) {}
+  ) {
+    this.debugLogWriter = new DebugLogWriter(client, options)
+  }
 
   supportsChildSessionLaunch() {
     return Boolean(this.client?.session?.create)
@@ -69,33 +46,19 @@ export class OpenCodeAdapter {
   }
 
   supportsPermissionReply() {
-    return Boolean(this.client?.permission?.reply || this.getRawClient())
+    return Boolean(this.client?.permission?.reply || getRawClient(this.client))
   }
 
   supportsQuestionReply() {
-    return Boolean(this.client?.question?.reply || this.getRawClient())
+    return Boolean(this.client?.question?.reply || getRawClient(this.client))
   }
 
   supportsQuestionReject() {
-    return Boolean(this.client?.question?.reject || this.getRawClient())
+    return Boolean(this.client?.question?.reject || getRawClient(this.client))
   }
 
   supportsParentReplies() {
     return Boolean(this.supportsPermissionReply() && this.supportsQuestionReply() && this.supportsQuestionReject())
-  }
-
-  private withDirectoryQuery<T extends QueryInput>(input: T, directory?: string): T {
-    if (typeof directory !== "string") {
-      return input
-    }
-
-    return {
-      ...input,
-      query: {
-        ...(input.query ?? {}),
-        directory,
-      },
-    }
   }
 
   async log(level: "debug" | "info" | "warn" | "error", message: string, extra?: UnknownRecord) {
@@ -126,7 +89,7 @@ export class OpenCodeAdapter {
   }
 
   async getSession(sessionID: string, directory?: string) {
-    return unwrap(await this.client.session.get(this.withDirectoryQuery({ path: { id: sessionID } }, directory)))
+    return unwrap(await this.client.session.get(withDirectoryQuery({ path: { id: sessionID } }, directory)))
   }
 
   async listSessions(options: { global?: boolean; directory?: string } = {}) {
@@ -156,15 +119,11 @@ export class OpenCodeAdapter {
   }
 
   async getSessionChildren(sessionID: string, directory?: string) {
-    return unwrap(
-      await this.client.session.children(this.withDirectoryQuery({ path: { id: sessionID } }, directory)),
-    ) as any[]
+    return unwrap(await this.client.session.children(withDirectoryQuery({ path: { id: sessionID } }, directory))) as any[]
   }
 
   async getSessionMessages(sessionID: string, directory?: string) {
-    return unwrap(
-      await this.client.session.messages(this.withDirectoryQuery({ path: { id: sessionID } }, directory)),
-    ) as any[]
+    return unwrap(await this.client.session.messages(withDirectoryQuery({ path: { id: sessionID } }, directory))) as any[]
   }
 
   async sessionContainsMessage(sessionID: string, messageID: string, directory?: string) {
@@ -173,166 +132,39 @@ export class OpenCodeAdapter {
   }
 
   async findSessionOwningMessage(messageID: string, options: { directory?: string; global?: boolean } = {}) {
-    const sessions = await this.listSessions(
-      options.global ? { global: true } : typeof options.directory === "string" ? { directory: options.directory } : {},
+    return findSessionOwningMessage(
+      {
+        getSession: this.getSession.bind(this),
+        listSessions: this.listSessions.bind(this),
+        sessionContainsMessage: this.sessionContainsMessage.bind(this),
+        debug: this.debug.bind(this),
+      },
+      messageID,
+      options,
     )
-
-    const ordered = [...sessions].sort((left, right) => sessionUpdatedAt(right) - sessionUpdatedAt(left))
-    for (const session of ordered) {
-      const sessionID = extractSessionID(session)
-      if (!sessionID) {
-        continue
-      }
-
-      const directory = extractDirectory(session) ?? options.directory
-      try {
-        if (await this.sessionContainsMessage(sessionID, messageID, directory)) {
-          await this.debug("findSessionOwningMessage matched session", {
-            messageId: messageID,
-            sessionId: sessionID,
-            directory,
-          })
-
-          return {
-            session,
-            sessionID,
-            directory,
-          }
-        }
-      } catch (error) {
-        await this.debug("findSessionOwningMessage session scan failed", {
-          messageId: messageID,
-          sessionId: sessionID,
-          directory,
-          error: error instanceof Error ? error.message : String(error),
-        })
-
-        continue
-      }
-    }
-
-    return undefined
   }
 
   async resolveCallerSession(caller: ToolCallerContext) {
-    const callerSessionID = caller.sessionId?.trim()
-    const callerMessageID = caller.messageId?.trim()
-    const scopeDirectory = caller.directory ?? caller.worktree
-
-    if (callerSessionID) {
-      try {
-        const resolved = await this.resolveSession(callerSessionID)
-        const resolvedCaller = {
-          sessionID: callerSessionID,
-          directory: resolved.directory ?? scopeDirectory,
-        }
-
-        if (!callerMessageID) {
-          await this.debug("resolveCallerSession used caller session without message verification", {
-            sessionId: callerSessionID,
-            directory: resolvedCaller.directory,
-          })
-
-          return {
-            ...resolvedCaller,
-            mode: "current_session" as const,
-          }
-        }
-
-        if (await this.sessionContainsMessage(callerSessionID, callerMessageID, resolvedCaller.directory)) {
-          await this.debug("resolveCallerSession verified caller message in caller session", {
-            sessionId: callerSessionID,
-            messageId: callerMessageID,
-            directory: resolvedCaller.directory,
-          })
-
-          return {
-            ...resolvedCaller,
-            mode: "current_session" as const,
-          }
-        }
-      } catch {
-        // Fall through to message-owner recovery.
-      }
-    }
-
-    if (callerMessageID) {
-      try {
-        const matched = await this.findSessionOwningMessage(callerMessageID, { directory: scopeDirectory })
-        if (matched) {
-          await this.debug("resolveCallerSession recovered caller session from message owner", {
-            requestedSessionId: callerSessionID,
-            recoveredSessionId: matched.sessionID,
-            messageId: callerMessageID,
-            directory: matched.directory,
-          })
-
-          return {
-            sessionID: matched.sessionID,
-            directory: matched.directory,
-            mode: "message_owner_session" as const,
-          }
-        }
-      } catch {
-        // Best-effort caller recovery only.
-      }
-    }
-
-    if (callerMessageID) {
-      await this.debug("resolveCallerSession could not prove caller message ownership", {
-        requestedSessionId: callerSessionID,
-        messageId: callerMessageID,
-        directory: scopeDirectory,
-      })
-    }
-
-    return undefined
+    return resolveCallerSession(
+      {
+        resolveSession: this.resolveSession.bind(this),
+        findSessionOwningMessage: this.findSessionOwningMessage.bind(this),
+        sessionContainsMessage: this.sessionContainsMessage.bind(this),
+        debug: this.debug.bind(this),
+      },
+      caller,
+    )
   }
 
   async resolveSession(sessionID: string) {
-    let scopedError: unknown = undefined
-
-    try {
-      const session = await this.getSession(sessionID)
-      await this.debug("resolveSession resolved scoped session", {
-        sessionId: sessionID,
-        directory: typeof session?.directory === "string" ? session.directory : undefined,
-      })
-
-      return {
-        session,
-        directory: typeof session?.directory === "string" ? session.directory : undefined,
-      }
-    } catch (error) {
-      await this.debug("resolveSession scoped lookup failed", {
-        sessionId: sessionID,
-        error: error instanceof Error ? error.message : String(error),
-      })
-
-      scopedError = error
-    }
-
-    const sessions = await this.listSessions({ global: true })
-    const matched = sessions.find((session: any) => extractSessionID(session) === sessionID)
-    if (!matched) {
-      await this.debug("resolveSession global lookup did not find session", {
-        sessionId: sessionID,
-      })
-
-      throw scopedError instanceof Error ? scopedError : new Error(`Session '${sessionID}' was not found`)
-    }
-
-    const directory = extractDirectory(matched) ?? ""
-    const session = await this.getSession(sessionID, directory)
-    await this.debug("resolveSession recovered session from global listing", {
-      sessionId: sessionID,
-      directory,
-    })
-
-    return {
-      session,
-      directory,
-    }
+    return resolveSession(
+      {
+        getSession: this.getSession.bind(this),
+        listSessions: this.listSessions.bind(this),
+        debug: this.debug.bind(this),
+      },
+      sessionID,
+    )
   }
 
   async createChildSession(parentSessionID: string, title?: string, directory?: string) {
@@ -348,7 +180,7 @@ export class OpenCodeAdapter {
   }
 
   async abortSession(sessionID: string, directory?: string) {
-    return unwrap(await this.client.session.abort(this.withDirectoryQuery({ path: { id: sessionID } }, directory)))
+    return unwrap(await this.client.session.abort(withDirectoryQuery({ path: { id: sessionID } }, directory)))
   }
 
   async listPendingPermissions(directory?: string) {
@@ -356,13 +188,8 @@ export class OpenCodeAdapter {
       return unwrap(await this.client.permission.list(typeof directory === "string" ? { directory } : undefined)) as any[]
     }
 
-    await this.debug("listPendingPermissions using raw-client fallback", {
-      directory,
-    })
-
-    return this.rawRequest<any[]>("GET", "/permission", {
-      query: this.directoryQuery(directory),
-    })
+    await this.debug("listPendingPermissions using raw-client fallback", { directory })
+    return rawRequest<any[]>(this.client, "GET", "/permission", { query: directoryQuery(directory) })
   }
 
   async replyPermissionRequest(
@@ -387,8 +214,8 @@ export class OpenCodeAdapter {
       directory,
     })
 
-    return this.rawRequest<boolean>("POST", `/permission/${encodeURIComponent(requestID)}/reply`, {
-      query: this.directoryQuery(directory),
+    return rawRequest<boolean>(this.client, "POST", `/permission/${encodeURIComponent(requestID)}/reply`, {
+      query: directoryQuery(directory),
       body: {
         reply,
         ...(message !== undefined ? { message } : {}),
@@ -401,13 +228,8 @@ export class OpenCodeAdapter {
       return unwrap(await this.client.question.list(typeof directory === "string" ? { directory } : undefined)) as any[]
     }
 
-    await this.debug("listPendingQuestions using raw-client fallback", {
-      directory,
-    })
-
-    return this.rawRequest<any[]>("GET", "/question", {
-      query: this.directoryQuery(directory),
-    })
+    await this.debug("listPendingQuestions using raw-client fallback", { directory })
+    return rawRequest<any[]>(this.client, "GET", "/question", { query: directoryQuery(directory) })
   }
 
   async replyQuestionRequest(requestID: string, answers: string[][], directory?: string) {
@@ -426,11 +248,9 @@ export class OpenCodeAdapter {
       directory,
     })
 
-    return this.rawRequest<boolean>("POST", `/question/${encodeURIComponent(requestID)}/reply`, {
-      query: this.directoryQuery(directory),
-      body: {
-        answers,
-      },
+    return rawRequest<boolean>(this.client, "POST", `/question/${encodeURIComponent(requestID)}/reply`, {
+      query: directoryQuery(directory),
+      body: { answers },
     })
   }
 
@@ -449,23 +269,23 @@ export class OpenCodeAdapter {
       directory,
     })
 
-    return this.rawRequest<boolean>("POST", `/question/${encodeURIComponent(requestID)}/reject`, {
-      query: this.directoryQuery(directory),
+    return rawRequest<boolean>(this.client, "POST", `/question/${encodeURIComponent(requestID)}/reject`, {
+      query: directoryQuery(directory),
     })
   }
 
   async promptNoReply(sessionID: string, text: string, directory?: string) {
+    const request = {
+      ...(withDirectoryQuery({ path: { id: sessionID } }, directory) as Record<string, unknown>),
+      body: {
+        noReply: true,
+        parts: [{ type: "text", text }],
+      },
+    }
+
     if (this.client?.session?.prompt) {
       try {
-        return unwrap(
-          await this.client.session.prompt({
-            ...(this.withDirectoryQuery({ path: { id: sessionID } }, directory) as Record<string, unknown>),
-            body: {
-              noReply: true,
-              parts: [{ type: "text", text }],
-            },
-          }),
-        )
+        return unwrap(await this.client.session.prompt(request))
       } catch (error) {
         if (isNoReplyParseError(error)) {
           await this.debug("promptNoReply swallowed known no-reply parse error", {
@@ -488,15 +308,7 @@ export class OpenCodeAdapter {
     }
 
     try {
-      return unwrap(
-        await this.client.session.promptAsync({
-          ...(this.withDirectoryQuery({ path: { id: sessionID } }, directory) as Record<string, unknown>),
-          body: {
-            noReply: true,
-            parts: [{ type: "text", text }],
-          },
-        }),
-      )
+      return unwrap(await this.client.session.promptAsync(request))
     } catch (error) {
       if (isNoReplyParseError(error)) {
         await this.debug("promptNoReply swallowed known no-reply parse error", {
@@ -521,149 +333,15 @@ export class OpenCodeAdapter {
   async promptAsync(sessionID: string, text: string, directory?: string) {
     return unwrap(
       await this.client.session.promptAsync({
-        ...(this.withDirectoryQuery({ path: { id: sessionID } }, directory) as Record<string, unknown>),
+        ...(withDirectoryQuery({ path: { id: sessionID } }, directory) as Record<string, unknown>),
         body: {
           parts: [{ type: "text", text }],
         },
       }),
-      )
-  }
-
-  private directoryQuery(directory?: string) {
-    return typeof directory === "string" ? { directory } : undefined
-  }
-
-  private getRawClient(): RawOpenCodeClient | undefined {
-    const raw = (this.client as { _client?: RawOpenCodeClient } | undefined)?._client
-    return typeof raw?.request === "function" ? raw : undefined
-  }
-
-  private async rawRequest<TData = unknown>(
-    method: string,
-    url: string,
-    options: {
-      query?: Record<string, unknown>
-      body?: unknown
-    } = {},
-  ) {
-    const raw = this.getRawClient()
-    if (!raw) {
-      throw new Error("OpenCode client does not expose the underlying request client")
-    }
-
-    try {
-      return await raw.request<TData>({
-        method,
-        url,
-        query: options.query,
-        body: options.body,
-        responseStyle: "data",
-        throwOnError: true,
-        parseAs: "auto",
-      })
-    } catch (error) {
-      const normalizedMessage = extractRawRequestErrorMessage(error)
-      if (error instanceof Error && normalizedMessage === error.message) {
-        throw error
-      }
-
-      throw new Error(normalizedMessage)
-    }
+    )
   }
 
   private async writeDebugEntry(level: "debug" | "info" | "warn" | "error", message: string, extra?: UnknownRecord) {
-    if (!this.options.debug?.enabled || this.debugFileWriteFailed) {
-      return
-    }
-
-    try {
-      const filePath = resolveDebugFilePath(this.options.rootDir, this.options.debug.filePath)
-      await mkdir(dirname(filePath), { recursive: true })
-      await appendFile(
-        filePath,
-        `${JSON.stringify({
-          at: new Date().toISOString(),
-          service: "opencode-mission-control",
-          level,
-          message,
-          extra,
-        })}\n`,
-        "utf8",
-      )
-    } catch (error) {
-      this.debugFileWriteFailed = true
-
-      if (this.client?.app?.log) {
-        try {
-          await this.client.app.log({
-            body: {
-              service: "opencode-mission-control",
-              level: "warn",
-              message: "Mission Control debug-file logging failed; disabling the file sink until restart.",
-              extra: {
-                configuredFilePath: this.options.debug?.filePath,
-                error: error instanceof Error ? error.message : String(error),
-              },
-            },
-          })
-        } catch {
-          // Never let debug logging break plugin behavior.
-        }
-      }
-    }
+    await this.debugLogWriter.write(level, message, extra)
   }
 }
-
-const sessionUpdatedAt = (session: any) =>
-  extractSessionTimestamp(session, "updated") ?? extractSessionTimestamp(session, "created") ?? 0
-
-const extractRawRequestErrorMessage = (error: unknown) => {
-  if (typeof error === "object" && error !== null) {
-    const objectError = error as {
-      message?: unknown
-      data?: {
-        message?: unknown
-      }
-    }
-
-    if (typeof objectError.data?.message === "string") {
-      return objectError.data.message
-    }
-
-    if (typeof objectError.message === "string") {
-      return objectError.message
-    }
-  }
-
-  return String(error)
-}
-
-const isNoReplyParseError = (error: unknown) => {
-  if (!(error instanceof Error)) {
-    return false
-  }
-
-  return error.message.includes("Unexpected EOF") || error.message.includes("Unexpected end of JSON input")
-}
-
-const resolveDebugFilePath = (rootDir: string | undefined, configuredPath: string | undefined) => {
-  const trimmed = configuredPath?.trim()
-  if (trimmed) {
-    if (trimmed.startsWith("~/")) {
-      return join(process.env.HOME?.trim() || homedir(), trimmed.slice(2))
-    }
-
-    return isAbsolute(trimmed) ? trimmed : resolvePath(getMissionControlCacheRoot(rootDir || "."), trimmed)
-  }
-
-  return join(getMissionControlCacheRoot(rootDir || "."), "debug.jsonl")
-}
-
-const getMissionControlCacheRoot = (rootDir: string) => {
-  const xdgCache = process.env.XDG_CACHE_HOME?.trim()
-  const home = process.env.HOME?.trim() || homedir()
-  const baseDir = xdgCache || (home ? join(home, ".cache") : tmpdir())
-  return join(baseDir, "opencode-mission-control", scopeKey(rootDir))
-}
-
-const scopeKey = (rootDir: string) => createHash("sha1").update(rootDir || "default").digest("hex").slice(0, 16)

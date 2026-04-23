@@ -485,20 +485,4 @@ export type DeepPartial<T> = {
   [K in keyof T]?: T[K] extends object ? DeepPartial<T[K]> : T[K]
 }
 
-export const ok = <T>(data: T): ToolSuccess<T> => ({
-  ok: true,
-  data,
-})
-
-export const fail = (
-  code: MissionControlErrorCode,
-  message: string,
-  suggestion?: string,
-): ToolFailure => ({
-  ok: false,
-  error: {
-    code,
-    message,
-    suggestion,
-  },
-})
+export { fail, ok } from "./types/tool-result.js"
