@@ -80,11 +80,17 @@ describe("MissionControl background jobs launch, attachment, and bootstrap failu
     }
 
     expect(status.data.job.childSessionId).toBe("child-session")
-    expect(status.data.result?.summary).toContain("Completed background analysis")
     expect(status.data.job.state).toBe("completed")
-    expect(status.data.result?.state).toBe("completed")
-    expect(status.data.job.completedAt).toBeDefined()
-    expect(status.data.job.lastObservedEvent).toBe("job.relay_delivered")
+    expect(status.data.job.hasResult).toBe(true)
+
+    const result = await controller.getResult(adapter, launchResult.data.jobId, false)
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected completed launch result to exist")
+    }
+
+    expect(result.data.summary).toContain("Completed background analysis")
+    expect(result.data.state).toBe("completed")
   })
 
   test("attaches to the current session when caller context includes a session id", async () => {

@@ -24,10 +24,10 @@ mc_job_question_reply({
 
 ## What it returns
 
-The updated tracked `job` record.
+A compact acknowledgement containing the updated job state.
 
 ## Caveats
 
-- This only works when `mc_job_status` shows `job.pendingInput.kind === "question"`.
+- This only works when `mc_job_status` shows `job.pendingKind === "question"` and `mc_job_pending_input` returns the question details.
 - This must be called from the parent session that launched the job.
 - Match the labels from the pending question options when selecting answers.

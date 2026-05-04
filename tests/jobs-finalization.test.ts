@@ -127,8 +127,6 @@ describe("MissionControl background jobs finalization and cancellation", () => {
     }
 
     expect(cancelResult.data.jobId).toBe(launchResult.data.jobId)
-    expect(cancelResult.data.sessionId).toBe("parent-session")
-    expect(cancelResult.data.childSessionId).toBe("child-abortable")
     expect(cancelResult.data.state).toBe("aborted")
   })
 

@@ -29,6 +29,46 @@ export const normalizeMessage = (
   }
 }
 
+export const hasVisibleTranscriptContent = (message: any, includeToolOutputs: boolean) => {
+  const parts = Array.isArray(message?.parts) ? message.parts : []
+
+  for (const part of parts) {
+    if (!part || typeof part !== "object") {
+      continue
+    }
+
+    const type = typeof part.type === "string" ? part.type : "unknown"
+    if (!includeToolOutputs && type === "tool") {
+      continue
+    }
+
+    if (extractPartText(part)) {
+      return true
+    }
+  }
+
+  return false
+}
+
+export const extractTailText = (message: any) => {
+  const parts = Array.isArray(message?.parts) ? message.parts : []
+  const text = parts
+    .filter((part: any) => {
+      if (!part || typeof part !== "object") {
+        return false
+      }
+
+      const type = typeof part.type === "string" ? part.type : "unknown"
+      return type !== "step-start" && type !== "step-finish" && type !== "tool" && type !== "reasoning"
+    })
+    .map((part: any) => extractPartText(part).trim())
+    .filter(Boolean)
+    .join("\n")
+    .trim()
+
+  return text || undefined
+}
+
 const normalizePart = (part: any): SessionTranscriptPart | undefined => {
   if (!part || typeof part !== "object") {
     return undefined

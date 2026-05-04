@@ -1,14 +1,24 @@
-import { OpenCodeAdapter } from "./opencode-client.js"
+import { OpenCodeAdapter, SessionMessagePagingUnsupportedError } from "./opencode-client.js"
 import { MissionControlRuntimeState } from "./runtime-state.js"
 import {
+  extractTailText,
   extractDirectory,
+  hasVisibleTranscriptContent,
   extractParentSessionID,
   extractSessionID,
   extractStatus,
   extractTitle,
   normalizeMessage,
 } from "./session-extractors.js"
-import type { SessionObserveResult, SessionReadResult, SessionTranscriptEntry, SessionTreeNode, ToolResult } from "./types.js"
+import type {
+  SessionObserveResult,
+  SessionReadResult,
+  SessionTailEntry,
+  SessionTailResult,
+  SessionTranscriptEntry,
+  SessionTreeNode,
+  ToolResult,
+} from "./types.js"
 import { fail, ok } from "./types.js"
 
 export class MissionControlSessionService {
@@ -19,107 +29,308 @@ export class MissionControlSessionService {
     sessionId: string,
     options: {
       beforeMessageId?: string
+      offset?: number
       limit?: number
       withChildren?: boolean
       withToolOutputs?: boolean
     },
   ): Promise<ToolResult<SessionReadResult>> {
-    const relatedSessions: Array<{ sessionID: string; directory?: string }> = []
+    const relatedSessions = await this.resolveRelatedSessions(adapter, sessionId, Boolean(options.withChildren), {
+      action: "readSession",
+      includeOffset: options.offset,
+      includeLimit: options.limit,
+      includeToolOutputs: options.withToolOutputs,
+    })
+    if (!relatedSessions.ok) {
+      return relatedSessions
+    }
 
-    try {
-      const resolved = await adapter.resolveSession(sessionId)
-      relatedSessions.push({
-        sessionID: sessionId,
-        directory: resolved.directory ?? extractDirectory(resolved.session),
-      })
-    } catch {
-      await adapter.debug("readSession failed to resolve session", {
-        sessionId,
-        withChildren: Boolean(options.withChildren),
-        withToolOutputs: Boolean(options.withToolOutputs),
+    if (!options.beforeMessageId && typeof options.limit === "number" && adapter.supportsSessionMessagePaging()) {
+      const paged = await this.loadRecentMessageRecordPage(adapter, sessionId, relatedSessions.data, {
+        offset: options.offset,
         limit: options.limit,
+        isEligible: (record) => hasVisibleTranscriptContent(record.message, options.withToolOutputs ?? false),
       })
-
-      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
-    }
-
-    if (options.withChildren) {
-      try {
-        const parentDirectory = relatedSessions[0]?.directory
-        const children = await adapter.getSessionChildren(sessionId, parentDirectory)
-        for (const child of children) {
-          const childID = extractSessionID(child)
-          if (childID) {
-            const cachedMetadata = this.state.metadataForSession(childID)
-            relatedSessions.push({
-              sessionID: childID,
-              directory: extractDirectory(child) ?? cachedMetadata?.directory ?? parentDirectory,
-            })
-          }
-        }
-      } catch {
-        await adapter.debug("readSession failed to load child sessions", {
+      if (paged === undefined) {
+        await adapter.debug("readSession falling back to exact full-history transcript load", {
           sessionId,
-          directory: relatedSessions[0]?.directory,
+          withChildren: Boolean(options.withChildren),
+          offset: options.offset,
+          limit: options.limit,
+          withToolOutputs: options.withToolOutputs,
         })
+      } else if (!paged.ok) {
+        return paged
+      } else {
+        const entries = paged.data.entries
+          .map(({ sessionID, message }) => normalizeMessage(sessionID, message, options.withToolOutputs ?? false))
+          .filter((entry): entry is SessionTranscriptEntry => Boolean(entry))
 
-        return fail(
-          "CurrentSessionUnavailable",
-          `Failed to load child sessions for '${sessionId}'.`,
-          "Retry the read, or retry without withChildren if the runtime is unstable.",
-        )
-      }
-    }
-
-    const messages: Array<{ sessionID: string; message: any; createdAt: number }> = []
-
-    for (const relatedSession of relatedSessions) {
-      try {
-        const sessionMessages = await adapter.getSessionMessages(relatedSession.sessionID, relatedSession.directory)
-        for (const message of sessionMessages) {
-          messages.push({
-            sessionID: relatedSession.sessionID,
-            message,
-            createdAt: getMessageCreatedAt(message),
-          })
-        }
-      } catch {
-        await adapter.debug("readSession failed to load session messages", {
+        return ok({
           sessionId,
-          relatedSessionId: relatedSession.sessionID,
-          directory: relatedSession.directory,
-        })
-
-        return fail(
-          "CurrentSessionUnavailable",
-          `Failed to load messages for session '${relatedSession.sessionID}'.`,
-          "Retry after the session becomes stable, or reduce the request scope.",
-        )
-      }
+          entries,
+        includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
+        offset: paged.data.offset,
+        hasMore: paged.data.hasMore,
+        nextOffset: paged.data.nextOffset,
+        totalEntries: paged.data.totalEntries,
+        totalEntriesExact: paged.data.totalEntriesExact,
+      })
+    }
     }
 
-    messages.sort((left, right) => left.createdAt - right.createdAt)
-    const cursorIndex = options.beforeMessageId
-      ? messages.findIndex(({ message }) => getMessageID(message) === options.beforeMessageId)
-      : -1
-    const cursorScopedMessages = cursorIndex >= 0 ? messages.slice(0, cursorIndex) : messages
-
-    const entries: SessionTranscriptEntry[] = []
-    for (const { sessionID, message } of cursorScopedMessages) {
-      const normalized = normalizeMessage(sessionID, message, options.withToolOutputs ?? false)
-      if (normalized) {
-        entries.push(normalized)
-      }
+    const messageGroups = await this.loadMessageGroups(adapter, sessionId, relatedSessions.data)
+    if (!messageGroups.ok) {
+      return messageGroups
     }
 
-    entries.sort((left, right) => left.createdAt - right.createdAt)
-    const boundedEntries = typeof options.limit === "number" ? entries.slice(-options.limit) : entries
+    if (!options.beforeMessageId && typeof options.limit === "number") {
+      const paged = selectRecentMessageRecords(messageGroups.data, {
+        offset: options.offset,
+        limit: options.limit,
+        isEligible: (record) => hasVisibleTranscriptContent(record.message, options.withToolOutputs ?? false),
+      })
+      const entries = paged.entries
+        .map(({ sessionID, message }) => normalizeMessage(sessionID, message, options.withToolOutputs ?? false))
+        .filter((entry): entry is SessionTranscriptEntry => Boolean(entry))
+
+      return ok({
+        sessionId,
+        entries,
+        includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
+        offset: paged.offset,
+        hasMore: paged.hasMore,
+        nextOffset: paged.nextOffset,
+        totalEntries: paged.totalEntries,
+        totalEntriesExact: true,
+      })
+    }
+
+    const messages = flattenMessageGroups(messageGroups.data)
+
+    const scopedMessages = applyBeforeMessageBoundary(messages, options.beforeMessageId)
+    const eligibleMessages = scopedMessages.filter(({ message }) =>
+      hasVisibleTranscriptContent(message, options.withToolOutputs ?? false),
+    )
+    const paged = paginateEntries(eligibleMessages, options.offset, options.limit)
+    const entries = paged.entries
+      .map(({ sessionID, message }) => normalizeMessage(sessionID, message, options.withToolOutputs ?? false))
+      .filter((entry): entry is SessionTranscriptEntry => Boolean(entry))
 
     return ok({
       sessionId,
-      entries: boundedEntries,
-      includedChildSessionIds: relatedSessions.slice(1).map((session) => session.sessionID),
+      entries,
+      includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
+      offset: paged.offset,
+      hasMore: paged.hasMore,
+      nextOffset: paged.nextOffset,
+      totalEntries: paged.totalEntries,
+      totalEntriesExact: true,
     })
+  }
+
+  async tailSession(
+    adapter: OpenCodeAdapter,
+    sessionId: string,
+    options: {
+      offset?: number
+      limit?: number
+      withChildren?: boolean
+    },
+  ): Promise<ToolResult<SessionTailResult>> {
+    const relatedSessions = await this.resolveRelatedSessions(adapter, sessionId, Boolean(options.withChildren), {
+      action: "tailSession",
+      includeOffset: options.offset,
+      includeLimit: options.limit,
+    })
+    if (!relatedSessions.ok) {
+      return relatedSessions
+    }
+
+    if (typeof options.limit === "number" && adapter.supportsSessionMessagePaging()) {
+      const paged = await this.loadRecentMessageRecordPage(adapter, sessionId, relatedSessions.data, {
+        offset: options.offset,
+        limit: options.limit,
+        isEligible: (record) => Boolean(extractTailText(record.message)),
+      })
+      if (paged === undefined) {
+        await adapter.debug("tailSession falling back to exact full-history transcript load", {
+          sessionId,
+          withChildren: Boolean(options.withChildren),
+          offset: options.offset,
+          limit: options.limit,
+        })
+      } else if (!paged.ok) {
+        return paged
+      } else {
+        const entries = paged.data.entries
+          .map((record) => {
+            const tailText = extractTailText(record.message)
+            return tailText ? toTailEntry({ ...record, tailText }) : undefined
+          })
+          .filter((entry): entry is SessionTailEntry => Boolean(entry))
+
+        return ok({
+          sessionId,
+          entries,
+          includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
+          offset: paged.data.offset,
+          hasMore: paged.data.hasMore,
+          nextOffset: paged.data.nextOffset,
+          totalEntries: paged.data.totalEntries,
+          totalEntriesExact: paged.data.totalEntriesExact,
+        })
+      }
+    }
+
+    const messageGroups = await this.loadMessageGroups(adapter, sessionId, relatedSessions.data)
+    if (!messageGroups.ok) {
+      return messageGroups
+    }
+
+    if (typeof options.limit === "number") {
+      const paged = selectRecentMessageRecords(messageGroups.data, {
+        offset: options.offset,
+        limit: options.limit,
+        isEligible: (record) => Boolean(extractTailText(record.message)),
+      })
+      const entries = paged.entries
+        .map((record) => {
+          const tailText = extractTailText(record.message)
+          return tailText ? toTailEntry({ ...record, tailText }) : undefined
+        })
+        .filter((entry): entry is SessionTailEntry => Boolean(entry))
+
+      return ok({
+        sessionId,
+        entries,
+        includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
+        offset: paged.offset,
+        hasMore: paged.hasMore,
+        nextOffset: paged.nextOffset,
+        totalEntries: paged.totalEntries,
+        totalEntriesExact: true,
+      })
+    }
+
+    const messages = flattenMessageGroups(messageGroups.data)
+
+    const eligibleMessages = messages
+      .map((record: SessionMessageRecord) => ({
+        ...record,
+        tailText: extractTailText(record.message),
+      }))
+      .filter((record): record is SessionMessageRecord & { tailText: string } => Boolean(record.tailText))
+    const paged = paginateEntries(eligibleMessages, options.offset, options.limit)
+    const entries = paged.entries.map((record) => toTailEntry(record))
+
+    return ok({
+      sessionId,
+      entries,
+      includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
+      offset: paged.offset,
+      hasMore: paged.hasMore,
+      nextOffset: paged.nextOffset,
+      totalEntries: paged.totalEntries,
+      totalEntriesExact: true,
+    })
+  }
+
+  private async loadRecentMessageRecordPage(
+    adapter: OpenCodeAdapter,
+    sessionId: string,
+    relatedSessions: Array<{ sessionID: string; directory?: string }>,
+    options: {
+      offset?: number
+      limit: number
+      isEligible: (record: SessionMessageRecord) => boolean
+    },
+  ): Promise<
+    | ToolResult<{
+      entries: SessionMessageRecord[]
+      offset: number
+      hasMore: boolean
+      nextOffset?: number
+      totalEntries: number
+      totalEntriesExact: boolean
+    }>
+    | undefined
+  > {
+    const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+    const limit = Math.max(1, Math.trunc(options.limit))
+    const targetCount = offset + limit + 1
+    const pageSize = getSessionMessagePageSize(offset, limit)
+    const states: PagedSessionState[] = relatedSessions.map((relatedSession, sessionOrder) => ({
+      sessionID: relatedSession.sessionID,
+      directory: relatedSession.directory,
+      sessionOrder,
+      eligibleRecords: [],
+      nextEligibleIndex: 0,
+      initialized: false,
+      exhausted: false,
+      oldestMessageOrder: 0,
+    }))
+
+    try {
+      await Promise.all(states.map((state) => loadNextPagedSessionChunk(adapter, state, pageSize, options.isEligible)))
+
+      const selectedNewest: SessionMessageRecord[] = []
+      while (selectedNewest.length < targetCount) {
+        let bestRecord: SessionMessageRecord | undefined
+        let bestState: PagedSessionState | undefined
+
+        for (const state of states) {
+          const candidate = await ensurePagedSessionCandidate(adapter, state, pageSize, options.isEligible)
+          if (!candidate) {
+            continue
+          }
+
+          if (!bestRecord || compareMessageRecordDescending(candidate, bestRecord) < 0) {
+            bestRecord = candidate
+            bestState = state
+          }
+        }
+
+        if (!bestRecord || !bestState) {
+          break
+        }
+
+        selectedNewest.push(bestRecord)
+        bestState.nextEligibleIndex += 1
+      }
+
+      const pageNewest = selectedNewest.slice(offset, offset + limit)
+      const entries = [...pageNewest].reverse()
+      const hasMore = selectedNewest.length > offset + pageNewest.length
+
+      return ok({
+        entries,
+        offset,
+        hasMore,
+        nextOffset: hasMore ? offset + pageNewest.length : undefined,
+        totalEntries: selectedNewest.length,
+        totalEntriesExact: !hasMore,
+      })
+    } catch (error) {
+      if (error instanceof SessionMessagePagingUnsupportedError) {
+        return undefined
+      }
+
+      const failedSessionID = error instanceof PagedSessionLoadError ? error.sessionID : relatedSessions[0]?.sessionID ?? sessionId
+      const failedDirectory = error instanceof PagedSessionLoadError ? error.directory : relatedSessions[0]?.directory
+
+      await adapter.debug("loadRecentMessageRecordPage failed to load session messages", {
+        sessionId,
+        relatedSessionId: failedSessionID,
+        directory: failedDirectory,
+      })
+
+      return fail(
+        "CurrentSessionUnavailable",
+        `Failed to load messages for session '${failedSessionID}'.`,
+        "Retry after the session becomes stable, or reduce the request scope.",
+      )
+    }
   }
 
   async sessionTree(adapter: OpenCodeAdapter, sessionId: string, depth = 1): Promise<ToolResult<SessionTreeNode>> {
@@ -268,9 +479,152 @@ export class MissionControlSessionService {
 
     return node
   }
+
+  private async resolveRelatedSessions(
+    adapter: OpenCodeAdapter,
+    sessionId: string,
+    withChildren: boolean,
+    debugContext: {
+      action: "readSession" | "tailSession"
+      includeOffset?: number
+      includeLimit?: number
+      includeToolOutputs?: boolean
+    },
+  ): Promise<ToolResult<Array<{ sessionID: string; directory?: string }>>> {
+    const relatedSessions: Array<{ sessionID: string; directory?: string }> = []
+
+    try {
+      const resolved = await adapter.resolveSession(sessionId)
+      relatedSessions.push({
+        sessionID: sessionId,
+        directory: resolved.directory ?? extractDirectory(resolved.session),
+      })
+    } catch {
+      await adapter.debug(`${debugContext.action} failed to resolve session`, {
+        sessionId,
+        withChildren,
+        offset: debugContext.includeOffset,
+        limit: debugContext.includeLimit,
+        withToolOutputs: debugContext.includeToolOutputs,
+      })
+
+      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
+    }
+
+    if (!withChildren) {
+      return ok(relatedSessions)
+    }
+
+    try {
+      const parentDirectory = relatedSessions[0]?.directory
+      const children = await adapter.getSessionChildren(sessionId, parentDirectory)
+      for (const child of children) {
+        const childID = extractSessionID(child)
+        if (childID) {
+          const cachedMetadata = this.state.metadataForSession(childID)
+          relatedSessions.push({
+            sessionID: childID,
+            directory: extractDirectory(child) ?? cachedMetadata?.directory ?? parentDirectory,
+          })
+        }
+      }
+    } catch {
+      await adapter.debug(`${debugContext.action} failed to load child sessions`, {
+        sessionId,
+        directory: relatedSessions[0]?.directory,
+      })
+
+      return fail(
+        "CurrentSessionUnavailable",
+        `Failed to load child sessions for '${sessionId}'.`,
+        withChildren ? "Retry without withChildren if the runtime is unstable, or retry after the runtime settles." : "Retry after the runtime settles.",
+      )
+    }
+
+    return ok(relatedSessions)
+  }
+
+  private async loadMessageGroups(
+    adapter: OpenCodeAdapter,
+    sessionId: string,
+    relatedSessions: Array<{ sessionID: string; directory?: string }>,
+  ): Promise<ToolResult<SessionMessageGroup[]>> {
+    const groups: SessionMessageGroup[] = []
+
+    for (const [sessionOrder, relatedSession] of relatedSessions.entries()) {
+      try {
+        const sessionMessages = await adapter.getSessionMessages(relatedSession.sessionID, relatedSession.directory)
+        const records = sessionMessages
+          .map((message, messageOrder) => ({
+            sessionID: relatedSession.sessionID,
+            message,
+            createdAt: getMessageCreatedAt(message),
+            sessionOrder,
+            messageOrder,
+          }))
+          .sort(compareMessageRecordAscending)
+
+        groups.push({
+          sessionID: relatedSession.sessionID,
+          records,
+        })
+      } catch {
+        await adapter.debug("loadMessageGroups failed to load session messages", {
+          sessionId,
+          relatedSessionId: relatedSession.sessionID,
+          directory: relatedSession.directory,
+        })
+
+        return fail(
+          "CurrentSessionUnavailable",
+          `Failed to load messages for session '${relatedSession.sessionID}'.`,
+          "Retry after the session becomes stable, or reduce the request scope.",
+        )
+      }
+    }
+
+    return ok(groups)
+  }
+
 }
 
 const getMessageID = (message: any) => (typeof message?.info?.id === "string" ? message.info.id : undefined)
+
+interface SessionMessageRecord {
+  sessionID: string
+  message: any
+  createdAt: number
+  sessionOrder: number
+  messageOrder: number
+}
+
+interface SessionMessageGroup {
+  sessionID: string
+  records: SessionMessageRecord[]
+}
+
+interface PagedSessionState {
+  sessionID: string
+  directory?: string
+  sessionOrder: number
+  eligibleRecords: SessionMessageRecord[]
+  nextEligibleIndex: number
+  nextCursor?: string
+  initialized: boolean
+  exhausted: boolean
+  oldestMessageOrder: number
+}
+
+class PagedSessionLoadError extends Error {
+  constructor(
+    readonly sessionID: string,
+    readonly directory?: string,
+    cause?: unknown,
+  ) {
+    super(cause instanceof Error ? cause.message : String(cause))
+    this.name = "PagedSessionLoadError"
+  }
+}
 
 const getMessageCreatedAt = (message: any) => {
   const createdAt = message?.info?.time?.created ?? message?.info?.createdAt
@@ -287,4 +641,220 @@ const getMessageCreatedAt = (message: any) => {
   }
 
   return Date.now()
+}
+
+const getSessionMessagePageSize = (offset: number, limit: number) => Math.max(25, Math.min(200, offset + limit + 1))
+
+const ensurePagedSessionCandidate = async (
+  adapter: OpenCodeAdapter,
+  state: PagedSessionState,
+  pageSize: number,
+  isEligible: (record: SessionMessageRecord) => boolean,
+) => {
+  while (true) {
+    const candidate = state.eligibleRecords[state.nextEligibleIndex]
+    if (candidate) {
+      return candidate
+    }
+
+    if (state.exhausted) {
+      return undefined
+    }
+
+    await loadNextPagedSessionChunk(adapter, state, pageSize, isEligible)
+  }
+}
+
+const loadNextPagedSessionChunk = async (
+  adapter: OpenCodeAdapter,
+  state: PagedSessionState,
+  pageSize: number,
+  isEligible: (record: SessionMessageRecord) => boolean,
+) => {
+  if (state.exhausted) {
+    return
+  }
+
+  try {
+    const page = await adapter.getSessionMessagePage(state.sessionID, {
+      directory: state.directory,
+      limit: pageSize,
+      before: state.nextCursor,
+    })
+    const messages = Array.isArray(page.messages) ? page.messages : []
+    const orderStart = state.initialized ? state.oldestMessageOrder - messages.length : 0
+    const records = messages.map((message, index) => ({
+      sessionID: state.sessionID,
+      message,
+      createdAt: getMessageCreatedAt(message),
+      sessionOrder: state.sessionOrder,
+      messageOrder: orderStart + index,
+    }))
+
+    if (messages.length > 0) {
+      state.oldestMessageOrder = orderStart
+    }
+    state.initialized = true
+    state.eligibleRecords.push(...records.filter(isEligible).reverse())
+
+    const nextCursor = typeof page.nextCursor === "string" && page.nextCursor.length > 0 ? page.nextCursor : undefined
+    const repeatedCursor = nextCursor !== undefined && nextCursor === state.nextCursor
+    state.nextCursor = nextCursor
+    state.exhausted = messages.length === 0 || !nextCursor || repeatedCursor
+  } catch (error) {
+    if (error instanceof SessionMessagePagingUnsupportedError) {
+      throw error
+    }
+
+    throw new PagedSessionLoadError(state.sessionID, state.directory, error)
+  }
+}
+
+const paginateEntries = <T>(entries: T[], rawOffset?: number, rawLimit?: number) => {
+  const totalEntries = entries.length
+  const offset = Math.max(0, Math.trunc(rawOffset ?? 0))
+  const endIndex = Math.max(0, totalEntries - offset)
+
+  if (rawLimit === undefined) {
+    return {
+      entries: entries.slice(0, endIndex),
+      offset,
+      hasMore: false,
+      nextOffset: undefined,
+      totalEntries,
+    }
+  }
+
+  const limit = Math.max(1, Math.trunc(rawLimit))
+  const startIndex = Math.max(0, endIndex - limit)
+  const visibleEntries = entries.slice(startIndex, endIndex)
+  const hasMore = startIndex > 0
+
+  return {
+    entries: visibleEntries,
+    offset,
+    hasMore,
+    nextOffset: hasMore ? offset + visibleEntries.length : undefined,
+    totalEntries,
+  }
+}
+
+const selectRecentMessageRecords = (
+  groups: SessionMessageGroup[],
+  options: {
+    offset?: number
+    limit: number
+    isEligible: (record: SessionMessageRecord) => boolean
+  },
+) => {
+  const offset = Math.max(0, Math.trunc(options.offset ?? 0))
+  const limit = Math.max(1, Math.trunc(options.limit))
+  const totalEntries = groups.reduce(
+    (count, group) => count + group.records.reduce((inner, record) => inner + Number(options.isEligible(record)), 0),
+    0,
+  )
+
+  if (totalEntries === 0 || offset >= totalEntries) {
+    return {
+      entries: [] as SessionMessageRecord[],
+      offset,
+      hasMore: false,
+      nextOffset: undefined,
+      totalEntries,
+    }
+  }
+
+  const needed = Math.min(totalEntries, offset + limit)
+  const cursors = groups
+    .map((group, groupIndex) => ({
+      groupIndex,
+      recordIndex: findPreviousEligibleIndex(group.records, group.records.length - 1, options.isEligible),
+    }))
+    .filter((cursor) => cursor.recordIndex >= 0)
+  const newestSelected: SessionMessageRecord[] = []
+
+  while (cursors.length > 0 && newestSelected.length < needed) {
+    let bestCursorIndex = 0
+    for (let index = 1; index < cursors.length; index += 1) {
+      const current = groups[cursors[index]!.groupIndex]!.records[cursors[index]!.recordIndex]!
+      const best = groups[cursors[bestCursorIndex]!.groupIndex]!.records[cursors[bestCursorIndex]!.recordIndex]!
+      if (compareMessageRecordDescending(current, best) < 0) {
+        bestCursorIndex = index
+      }
+    }
+
+    const selectedCursor = cursors[bestCursorIndex]!
+    newestSelected.push(groups[selectedCursor.groupIndex]!.records[selectedCursor.recordIndex]!)
+    selectedCursor.recordIndex = findPreviousEligibleIndex(
+      groups[selectedCursor.groupIndex]!.records,
+      selectedCursor.recordIndex - 1,
+      options.isEligible,
+    )
+    if (selectedCursor.recordIndex < 0) {
+      cursors.splice(bestCursorIndex, 1)
+    }
+  }
+
+  const pageNewest = newestSelected.slice(offset, offset + limit)
+  const entries = [...pageNewest].reverse()
+  const hasMore = totalEntries > offset + pageNewest.length
+
+  return {
+    entries,
+    offset,
+    hasMore,
+    nextOffset: hasMore ? offset + pageNewest.length : undefined,
+    totalEntries,
+  }
+}
+
+const findPreviousEligibleIndex = (
+  records: SessionMessageRecord[],
+  startIndex: number,
+  isEligible: (record: SessionMessageRecord) => boolean,
+) => {
+  for (let index = startIndex; index >= 0; index -= 1) {
+    if (isEligible(records[index]!)) {
+      return index
+    }
+  }
+
+  return -1
+}
+
+const flattenMessageGroups = (groups: SessionMessageGroup[]): SessionMessageRecord[] =>
+  groups.flatMap((group) => group.records).sort(compareMessageRecordAscending)
+
+const compareMessageRecordAscending = (left: SessionMessageRecord, right: SessionMessageRecord) => {
+  if (left.createdAt !== right.createdAt) {
+    return left.createdAt - right.createdAt
+  }
+
+  if (left.sessionOrder !== right.sessionOrder) {
+    return left.sessionOrder - right.sessionOrder
+  }
+
+  return left.messageOrder - right.messageOrder
+}
+
+const compareMessageRecordDescending = (left: SessionMessageRecord, right: SessionMessageRecord) =>
+  compareMessageRecordAscending(right, left)
+
+const toTailEntry = (entry: { sessionID: string; message: any; createdAt: number; tailText: string }): SessionTailEntry => {
+  const info = entry.message?.info ?? {}
+  return {
+    sessionId: entry.sessionID,
+    messageId: typeof info.id === "string" ? info.id : `${entry.sessionID}:${entry.createdAt}`,
+    role: typeof info.role === "string" ? info.role : "unknown",
+    agent: typeof info.agent === "string" ? info.agent : undefined,
+    createdAt: entry.createdAt,
+    text: entry.tailText,
+  }
+}
+
+const applyBeforeMessageBoundary = <T extends { message: any }>(messages: T[], beforeMessageId: string | undefined) => {
+  const cursorIndex = beforeMessageId
+    ? messages.findIndex(({ message }) => getMessageID(message) === beforeMessageId)
+    : -1
+  return cursorIndex >= 0 ? messages.slice(0, cursorIndex) : messages
 }

@@ -73,7 +73,7 @@ describe("MissionControl background jobs launch and attachment", () => {
     }
 
     expect(status.data.job.state).toBe("completed")
-    expect(status.data.result?.state).toBe("completed")
+    expect(status.data.job.hasResult).toBe(true)
   })
 
 })

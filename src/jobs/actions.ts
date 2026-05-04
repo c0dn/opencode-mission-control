@@ -5,14 +5,14 @@ import {
   type LocalPermissionReplyIntent,
   rememberLocalPermissionReply,
 } from "./permission-replies.js"
-import { collectBlockers, isClosedJobState, isResolvedPendingRequest, toPublicJob } from "../job-helpers.js"
+import { collectBlockers, isClosedJobState, isResolvedPendingRequest, toPublicActionResult } from "../job-helpers.js"
 import type {
   BackgroundJob,
+  JobActionResult,
   JobLifecycleEvent,
   JobPermissionReplyArgs,
   JobQuestionReplyArgs,
   JobResultSnapshot,
-  MissionControlJob,
   ToolCallerContext,
   ToolFailure,
   ToolResult,
@@ -51,7 +51,7 @@ export const replyPermission = async (
   adapter: OpenCodeAdapter,
   args: JobPermissionReplyArgs,
   caller: ToolCallerContext = {},
-): Promise<ToolResult<MissionControlJob>> => {
+): Promise<ToolResult<JobActionResult>> => {
   const job = runtime.jobs.get(args.jobId)
   if (!job) {
     return fail("JobNotFound", `Job '${args.jobId}' was not found.`)
@@ -115,7 +115,7 @@ export const replyPermission = async (
       reply: args.reply,
     })
 
-    return ok(toPublicJob(job))
+    return ok(toPublicActionResult(job))
   }
 
   const previousState = job.state
@@ -142,9 +142,9 @@ export const replyPermission = async (
       error: error instanceof Error ? error.message : String(error),
     })
 
-    return ok(toPublicJob(job))
+    return ok(toPublicActionResult(job))
   }
-  return ok(toPublicJob(job))
+  return ok(toPublicActionResult(job))
 }
 
 export const replyQuestion = async (
@@ -152,7 +152,7 @@ export const replyQuestion = async (
   adapter: OpenCodeAdapter,
   args: JobQuestionReplyArgs,
   caller: ToolCallerContext = {},
-): Promise<ToolResult<MissionControlJob>> => {
+): Promise<ToolResult<JobActionResult>> => {
   const job = runtime.jobs.get(args.jobId)
   if (!job) {
     return fail("JobNotFound", `Job '${args.jobId}' was not found.`)
@@ -215,9 +215,9 @@ export const replyQuestion = async (
       error: error instanceof Error ? error.message : String(error),
     })
 
-    return ok(toPublicJob(job))
+    return ok(toPublicActionResult(job))
   }
-  return ok(toPublicJob(job))
+  return ok(toPublicActionResult(job))
 }
 
 export const rejectQuestion = async (
@@ -225,7 +225,7 @@ export const rejectQuestion = async (
   adapter: OpenCodeAdapter,
   jobID: string,
   caller: ToolCallerContext = {},
-): Promise<ToolResult<MissionControlJob>> => {
+): Promise<ToolResult<JobActionResult>> => {
   const job = runtime.jobs.get(jobID)
   if (!job) {
     return fail("JobNotFound", `Job '${jobID}' was not found.`)
@@ -284,7 +284,7 @@ export const rejectQuestion = async (
     runtime.closeJobTracking(job)
     const relayResult = await runtime.relayResult(adapter, job.jobID)
     if (!relayResult.ok) {
-      return ok(toPublicJob(job))
+        return ok(toPublicActionResult(job))
     }
     await runtime.persist()
   } catch (error) {
@@ -295,9 +295,9 @@ export const rejectQuestion = async (
       error: error instanceof Error ? error.message : String(error),
     })
 
-    return ok(toPublicJob(job))
+    return ok(toPublicActionResult(job))
   }
-  return ok(toPublicJob(job))
+  return ok(toPublicActionResult(job))
 }
 
 export const cancelJob = async (
@@ -305,7 +305,7 @@ export const cancelJob = async (
   adapter: OpenCodeAdapter,
   jobID: string,
   caller: ToolCallerContext = {},
-): Promise<ToolResult<MissionControlJob>> => {
+): Promise<ToolResult<JobActionResult>> => {
   const job = runtime.jobs.get(jobID)
   if (!job) {
     return fail("JobNotFound", `Job '${jobID}' was not found.`)
@@ -358,7 +358,7 @@ export const cancelJob = async (
     runtime.closeJobTracking(job)
     const relayResult = await runtime.relayResult(adapter, jobID)
     if (!relayResult.ok) {
-      return ok(toPublicJob(job))
+        return ok(toPublicActionResult(job))
     }
     await runtime.persist()
   } catch (error) {
@@ -368,7 +368,7 @@ export const cancelJob = async (
       error: error instanceof Error ? error.message : String(error),
     })
 
-    return ok(toPublicJob(job))
+    return ok(toPublicActionResult(job))
   }
-  return ok(toPublicJob(job))
+  return ok(toPublicActionResult(job))
 }

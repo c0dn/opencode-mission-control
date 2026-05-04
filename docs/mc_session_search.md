@@ -71,7 +71,7 @@ Tool outputs are **not indexed by default**. That keeps the cache smaller and av
 If you need raw tool outputs from a session, use:
 
 ```text
-mc_session_read({ sessionId: "ses_123", withToolOutputs: true })
+mc_session_read({ sessionId: "ses_123", offset: 0, limit: 25, withToolOutputs: true })
 ```
 
 ## Cache location

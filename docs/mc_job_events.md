@@ -22,7 +22,7 @@ mc_job_events({ jobId: "job_123", limit: 25 })
 ## What it returns
 
 - `jobId`
-- `events` — most-recent-first persisted job events
+- `events` — most-recent-first compact persisted job events
 
 Events may include:
 
@@ -33,6 +33,8 @@ Events may include:
 ## Caveats
 
 - This is Mission Control’s persisted job event store, not the full child transcript.
+- Events are intentionally compact and do not expose the full internal metadata blobs.
 - The persisted feed is retained as a recent history window, not an unbounded forever-log.
 - Persistence is still best-effort; if a sidecar write fails after a successful reply/progress action, the newest event may not survive an immediate restart.
-- For the current job snapshot and any pending blocked input, use `mc_job_status`.
+- For the current job snapshot, use `mc_job_status`.
+- For detailed blocked permission/question payloads, use `mc_job_pending_input`.

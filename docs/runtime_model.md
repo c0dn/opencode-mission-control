@@ -120,6 +120,15 @@ Mission Control uses event/state tracking as the source of truth for lifecycle s
 
 For long-running work, attached child sessions may also call `mc_job_update({ message, notifyParent? })` to append progress events without ending the job.
 
+## Transcript inspection
+
+- `mc_session_read` is the exact transcript inspection tool and supports newest-relative paging with `offset` and `limit`
+- `mc_session_tail` is the compact recent-message view and omits tool outputs, reasoning, and step markers
+- limited `mc_session_read` / `mc_session_tail` calls now use raw OpenCode session-message paging when the runtime exposes the raw request client
+- that raw paged path fetches only enough recent message pages to satisfy the requested page plus one older-entry probe for `hasMore`
+- anchored reads (`beforeMessageId`) and runtimes without the raw request client still use the exact full-history path
+- because the upstream session-message API does not expose a total-count field, `totalEntriesExact` is `false` and `totalEntries` is only a lower bound whenever `hasMore` is `true` on the raw paged path
+
 ## Event handling model
 
 Mission Control listens to OpenCode events and maps them to runtime state updates.

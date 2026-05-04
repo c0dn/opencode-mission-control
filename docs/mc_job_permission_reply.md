@@ -31,10 +31,10 @@ mc_job_permission_reply({
 
 ## What it returns
 
-The updated tracked `job` record.
+A compact acknowledgement containing the updated job state.
 
 ## Caveats
 
-- This only works when `mc_job_status` shows `job.pendingInput.kind === "permission"`.
+- This only works when `mc_job_status` shows `job.pendingKind === "permission"` and `mc_job_pending_input` returns the permission details.
 - This must be called from the parent session that launched the job.
 - Mission Control replies through the native OpenCode permission API; it does not fake the reply with transcript text.

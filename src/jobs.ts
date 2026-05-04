@@ -26,7 +26,13 @@ import {
   resolvePendingQuestionRequest as findPendingQuestionRequest,
 } from "./jobs/pending-input.js"
 import { updateProgress as performJobProgressUpdate } from "./jobs/progress.js"
-import { getResult as readJobResult, jobEvents as readJobEvents, listJobs as listTrackedJobs, status as readJobStatus } from "./jobs/query.js"
+import {
+  getResult as readJobResult,
+  jobEvents as readJobEvents,
+  listJobs as listTrackedJobs,
+  pendingInput as readJobPendingInput,
+  status as readJobStatus,
+} from "./jobs/query.js"
 import { resolveCallerSessionID as resolveCallerSession, validateParentCaller as validateJobParentCaller } from "./jobs/session-auth.js"
 import { enqueueJobStorePersist, loadJobStore, type JobStoreSnapshot } from "./jobs/store.js"
 import { collectBlockers, createJobID, isLiveTrackedJobState, isRecoverableJobState, normalizeLoadedJob } from "./job-helpers.js"
@@ -280,6 +286,10 @@ export class MissionControlJobController {
 
   status(jobID: string) {
     return readJobStatus(this.getRuntime(), jobID)
+  }
+
+  pendingInput(jobID: string) {
+    return readJobPendingInput(this.getRuntime(), jobID)
   }
 
   jobEvents(jobID: string, limit = 20) {

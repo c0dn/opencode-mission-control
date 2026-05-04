@@ -27,6 +27,7 @@ type PluginContext = {
   client: any
   directory?: string
   worktree?: string
+  serverUrl?: URL
 }
 
 const SERVER_STORE_KEY = "__opencodeMissionControlServerStore__"
@@ -64,7 +65,9 @@ export class MissionControlServer {
     this.secrets = secrets
     this.adapter = new OpenCodeAdapter(context.client, {
       rootDir,
+      directory: context.directory,
       debug: config.debug,
+      serverUrl: context.serverUrl,
     })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState = new MissionControlRuntimeState(config.observe.eventBufferSize)
@@ -105,7 +108,9 @@ export class MissionControlServer {
     this.secrets = secrets
     this.adapter = new OpenCodeAdapter(context.client, {
       rootDir,
+      directory: context.directory,
       debug: config.debug,
+      serverUrl: context.serverUrl,
     })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState.setBufferSize(config.observe.eventBufferSize)
@@ -154,29 +159,34 @@ export class MissionControlServer {
   }
 
   capabilities(): MissionControlCapabilityMatrix {
+    const exposesSessionTools = this.config.tools.surface !== "jobs-only"
+    const exposesJobTools = this.config.tools.surface !== "inspect-only"
+
     return {
       search: {
-        sessionRead: true,
-        sessionTree: true,
-        indexedRetrieval: this.config.search.lexicalEnabled,
-        semanticRetrieval: this.semanticProvider?.isAvailable() ?? false,
+        sessionRead: exposesSessionTools,
+        sessionTail: exposesSessionTools,
+        sessionTree: exposesSessionTools,
+        indexedRetrieval: exposesSessionTools && this.config.search.lexicalEnabled,
+        semanticRetrieval: exposesSessionTools && (this.semanticProvider?.isAvailable() ?? false),
       },
       observe: {
-        liveEvents: true,
-        recentBuffer: true,
+        liveEvents: exposesSessionTools,
+        recentBuffer: exposesSessionTools,
       },
       jobs: {
-        childSessionLaunch: this.config.jobs.enabled && this.adapter.supportsChildSessionLaunch(),
-        asyncPrompt: this.config.jobs.enabled && this.adapter.supportsAsyncPrompt(),
-        resultRelay: this.config.jobs.enabled && this.adapter.supportsResultRelay(),
-        blockedInputRelay: this.config.jobs.enabled && this.adapter.supportsResultRelay(),
-        abort: this.config.jobs.enabled && this.adapter.supportsAbortSession(),
-        permissionReply: this.config.jobs.enabled && this.adapter.supportsPermissionReply(),
-        questionReply: this.config.jobs.enabled && this.adapter.supportsQuestionReply(),
-        questionReject: this.config.jobs.enabled && this.adapter.supportsQuestionReject(),
-        parentReplies: this.config.jobs.enabled && this.adapter.supportsParentReplies(),
-        eventFeed: this.config.jobs.enabled,
-        progressUpdates: this.config.jobs.enabled,
+        childSessionLaunch: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsChildSessionLaunch(),
+        asyncPrompt: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsAsyncPrompt(),
+        resultRelay: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsResultRelay(),
+        blockedInputRelay: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsResultRelay(),
+        abort: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsAbortSession(),
+        permissionReply: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsPermissionReply(),
+        questionReply: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsQuestionReply(),
+        questionReject: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsQuestionReject(),
+        pendingInputDetails: exposesJobTools && this.config.jobs.enabled,
+        parentReplies: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsParentReplies(),
+        eventFeed: exposesJobTools && this.config.jobs.enabled,
+        progressUpdates: exposesJobTools && this.config.jobs.enabled,
       },
     }
   }
@@ -197,11 +207,15 @@ export class MissionControlServer {
       startedAt: this.startedAt,
       directory: rootDir,
       implemented: {
-        sessionRead: true,
-        sessionTree: true,
-        sessionObserve: true,
-        sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
-        jobStart: this.config.jobs.enabled,
+        sessionRead: this.config.tools.surface !== "jobs-only",
+        sessionTail: this.config.tools.surface !== "jobs-only",
+        sessionTree: this.config.tools.surface !== "jobs-only",
+        sessionObserve: this.config.tools.surface !== "jobs-only",
+        sessionSearch:
+          this.config.tools.surface !== "jobs-only" &&
+          (this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false)),
+        jobPendingInput: this.config.tools.surface !== "inspect-only",
+        jobStart: this.config.tools.surface !== "inspect-only" && this.config.jobs.enabled,
       },
       config: this.config,
       counters: this.runtimeState.counters(),
@@ -237,6 +251,7 @@ export class MissionControlServer {
     sessionId: string,
     options: {
       beforeMessageId?: string
+      offset?: number
       limit?: number
       withChildren?: boolean
       withToolOutputs?: boolean
@@ -244,6 +259,18 @@ export class MissionControlServer {
   ) {
     const adapter = this.adapter
     return this.sessionService.readSession(adapter, sessionId, options)
+  }
+
+  async tailSession(
+    sessionId: string,
+    options: {
+      offset?: number
+      limit?: number
+      withChildren?: boolean
+    },
+  ) {
+    const adapter = this.adapter
+    return this.sessionService.tailSession(adapter, sessionId, options)
   }
 
   async sessionTree(sessionId: string, depth = 1) {
@@ -275,6 +302,10 @@ export class MissionControlServer {
 
   jobStatus(jobID: string) {
     return this.jobController.status(jobID)
+  }
+
+  jobPendingInput(jobID: string) {
+    return this.jobController.pendingInput(jobID)
   }
 
   listJobs(args: JobListArgs = {}) {

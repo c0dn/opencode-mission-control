@@ -32,9 +32,7 @@ A stable result snapshot containing:
 - `summary`
 - `blockers`
 - `recommendedNextStep` when the child session reported one
-- `keyMessageIds`
 - `state`
-- `observedAt`
 
 ## Caveats
 

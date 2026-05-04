@@ -80,7 +80,15 @@ describe("MissionControl background jobs blocked input - permission", () => {
     }
 
     expect(status.data.job.state).toBe("waiting_permission")
-    expect(status.data.job.pendingInput).toMatchObject({
+    expect(status.data.job.pendingKind).toBe("permission")
+
+    const pendingInput = controller.pendingInput(launchResult.data.jobId)
+    expect(pendingInput.ok).toBe(true)
+    if (!pendingInput.ok) {
+      throw new Error("Expected permission details to exist")
+    }
+
+    expect(pendingInput.data.pendingInput).toMatchObject({
       kind: "permission",
       requestId: "perm-1",
       permission: "bash",
@@ -164,7 +172,15 @@ describe("MissionControl background jobs blocked input - permission", () => {
       throw new Error("Expected sparse-permission job status to exist")
     }
 
-    expect(status.data.job.pendingInput).toMatchObject({
+    expect(status.data.job.pendingKind).toBe("permission")
+
+    const pendingInput = controller.pendingInput(launchResult.data.jobId)
+    expect(pendingInput.ok).toBe(true)
+    if (!pendingInput.ok) {
+      throw new Error("Expected sparse permission details to exist")
+    }
+
+    expect(pendingInput.data.pendingInput).toMatchObject({
       kind: "permission",
       requestId: "perm-fallback",
       permission: "bash",
@@ -243,7 +259,15 @@ describe("MissionControl background jobs blocked input - permission", () => {
     }
 
     expect(status.data.job.state).toBe("waiting_permission")
-    expect(status.data.job.pendingInput).toMatchObject({
+    expect(status.data.job.pendingKind).toBe("permission")
+
+    const pendingInput = controller.pendingInput(launchResult.data.jobId)
+    expect(pendingInput.ok).toBe(true)
+    if (!pendingInput.ok) {
+      throw new Error("Expected status-fallback permission details to exist")
+    }
+
+    expect(pendingInput.data.pendingInput).toMatchObject({
       kind: "permission",
       requestId: "perm-status-fallback",
       permission: "edit",
@@ -313,7 +337,8 @@ describe("MissionControl background jobs blocked input - permission", () => {
     }
 
     expect(status.data.job.state).toBe("waiting_permission")
-    expect(status.data.job.pendingInput).toBeUndefined()
+    expect(status.data.job.pendingKind).toBeUndefined()
+    expect(controller.pendingInput(launchResult.data.jobId).ok).toBe(false)
     expect(parentMessages).toHaveLength(1)
     expect(parentMessages[0]).toContain("blocked")
   })
@@ -408,7 +433,7 @@ describe("MissionControl background jobs blocked input - permission", () => {
     }
 
     expect(status.data.job.state).toBe("running")
-    expect(status.data.job.pendingInput).toBeUndefined()
+    expect(status.data.job.pendingKind).toBeUndefined()
 
     const eventsResult = controller.jobEvents(launchResult.data.jobId, 10)
     expect(eventsResult.ok).toBe(true)
@@ -417,15 +442,11 @@ describe("MissionControl background jobs blocked input - permission", () => {
     }
 
     const permissionEvent = eventsResult.data.events.find((event) => event.type === "permission.replied")
-    expect(permissionEvent?.metadata).toMatchObject({
+    expect(permissionEvent).toMatchObject({
+      type: "permission.replied",
+      state: "running",
       requestId: "perm-2",
-      replySource: "mission_control_local_reply",
-      reply: "once",
-      callerSessionId: "parent-session",
-      parentSessionId: "parent-session",
-      localReplyJobId: launchResult.data.jobId,
     })
-    expect(permissionEvent?.metadata?.initiatedAt).toEqual(expect.any(Number))
   })
 
   test("records external provenance when a permission reply arrives without mc_job_permission_reply", async () => {
@@ -498,10 +519,7 @@ describe("MissionControl background jobs blocked input - permission", () => {
 
     const permissionEvent = eventsResult.data.events.find((event) => event.type === "permission.replied")
     expect(permissionEvent?.detail).toBe("Permission request resolved by an external reply source.")
-    expect(permissionEvent?.metadata).toMatchObject({
-      requestId: "perm-external-source",
-      replySource: "external_unknown_reply",
-    })
+    expect(permissionEvent?.requestId).toBe("perm-external-source")
   })
 
   test("does not reopen a replied permission request when session.status fallback still returns the just-answered request", async () => {
@@ -593,7 +611,7 @@ describe("MissionControl background jobs blocked input - permission", () => {
     }
 
     expect(status.data.job.state).toBe("running")
-    expect(status.data.job.pendingInput).toBeUndefined()
+    expect(status.data.job.pendingKind).toBeUndefined()
   })
 
   test("rejects blocked-input replies from sessions other than the parent", async () => {
@@ -746,7 +764,7 @@ describe("MissionControl background jobs blocked input - permission", () => {
     }
 
     expect(status.data.job.state).toBe("running")
-    expect(status.data.job.pendingInput).toBeUndefined()
+    expect(status.data.job.pendingKind).toBeUndefined()
   })
 
   test("fails fast when replying to a permission request that is not pending", async () => {

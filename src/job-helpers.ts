@@ -5,6 +5,7 @@ import {
 
 import type {
   BackgroundJob,
+  JobActionResult,
   JobLifecycleEvent,
   JobPendingInput,
   JobPendingPermissionRequest,
@@ -12,6 +13,7 @@ import type {
   JobResultSnapshot,
   MissionControlJob,
   MissionControlJobEvent,
+  MissionControlPendingInput,
   MissionControlJobResult,
   PendingInputKind,
 } from "./types.js"
@@ -154,24 +156,14 @@ export const normalizeLoadedJob = (job: BackgroundJob): BackgroundJob => {
   }
 }
 
-export const toPublicJob = (job: BackgroundJob): MissionControlJob => ({
+export const toPublicJob = (job: BackgroundJob, hasResult = false): MissionControlJob => ({
   jobId: job.jobID,
-  sessionId: job.parentSessionID,
-  parentDirectory: job.parentDirectory,
-  childSessionId: job.childSessionID,
-  childDirectory: job.childDirectory,
   title: job.title,
-  prompt: job.prompt,
   state: job.state,
-  createdAt: job.createdAt,
-  updatedAt: job.updatedAt,
-  launchedAt: job.launchedAt,
-  completedAt: job.completedAt,
+  childSessionId: job.childSessionID,
+  pendingKind: job.pendingInput?.kind,
   failureReason: job.failureReason,
-  lastObservedEvent: job.lastObservedEvent,
-  lastSourceUpdatedAt: job.lastSourceUpdatedAt,
-  relayState: job.relayState,
-  pendingInput: job.pendingInput,
+  hasResult,
 })
 
 export const toPublicJobResult = (result: JobResultSnapshot | undefined): MissionControlJobResult | undefined =>
@@ -184,22 +176,44 @@ export const toPublicJobResult = (result: JobResultSnapshot | undefined): Missio
         summary: result.summary,
         blockers: result.blockers,
         recommendedNextStep: result.recommendedNextStep,
-        keyMessageIds: result.keyMessageIDs,
-        observedAt: result.observedAt,
       }
     : undefined
 
 export const toPublicJobEvent = (event: JobLifecycleEvent): MissionControlJobEvent => ({
-  eventId: event.eventID,
-  jobId: event.jobID,
-  sessionId: event.parentSessionID,
-  childSessionId: event.childSessionID,
+  at: event.at,
   type: event.type,
   state: event.state,
-  previousState: event.previousState,
-  at: event.at,
   detail: event.detail,
-  metadata: event.metadata,
+  requestId: extractEventRequestId(event.metadata),
+})
+
+export const toPublicPendingInput = (job: BackgroundJob): MissionControlPendingInput | undefined => {
+  if (job.pendingInput?.kind === "permission") {
+    return {
+      kind: "permission",
+      requestId: job.pendingInput.requestId,
+      permission: job.pendingInput.permission,
+      patterns: job.pendingInput.patterns,
+      always: job.pendingInput.always,
+      reason: typeof job.pendingInput.metadata?.reason === "string" ? job.pendingInput.metadata.reason : undefined,
+    }
+  }
+
+  if (job.pendingInput?.kind === "question") {
+    return {
+      kind: "question",
+      requestId: job.pendingInput.requestId,
+      questions: job.pendingInput.questions,
+    }
+  }
+
+  return undefined
+}
+
+export const toPublicActionResult = (job: BackgroundJob): JobActionResult => ({
+  jobId: job.jobID,
+  state: job.state,
+  failureReason: job.failureReason,
 })
 
 export const toPendingPermissionRequest = (value: unknown): JobPendingPermissionRequest | undefined => {
@@ -385,3 +399,25 @@ export const isRecoverableJobState = (state: BackgroundJob["state"]) =>
 
 export const isLiveTrackedJobState = (state: BackgroundJob["state"]) =>
   ["queued", "launching", "running", "waiting_permission", "waiting_question"].includes(state)
+
+const extractEventRequestId = (metadata: Record<string, unknown> | undefined) => {
+  if (!metadata) {
+    return undefined
+  }
+
+  if (typeof metadata.requestId === "string") {
+    return metadata.requestId
+  }
+
+  const pendingInput = metadata.pendingInput
+  if (
+    pendingInput &&
+    typeof pendingInput === "object" &&
+    "requestId" in pendingInput &&
+    typeof pendingInput.requestId === "string"
+  ) {
+    return pendingInput.requestId
+  }
+
+  return undefined
+}

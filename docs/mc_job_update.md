@@ -27,8 +27,9 @@ mc_job_update({
 
 ## What it returns
 
-- updated `job`
-- appended `event`
+- `jobId`
+- updated compact `state`
+- appended `eventId`
 
 ## Caveats
 

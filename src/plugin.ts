@@ -8,17 +8,21 @@ import type { MissionControlPluginOptions } from "./types.js"
 
 const TOOL_GUIDANCE: Record<string, string> = {
   mc_session_read:
-    "Use this when you need exact transcript entries or raw tool outputs. Example: mc_session_read({ sessionId: 'ses_123', withToolOutputs: true }).",
+    "Use this for exact transcript inspection across older session history. Prefer paging with offset/limit instead of reading everything at once. Only set withToolOutputs: true when raw tool output is truly required.",
+  mc_session_tail:
+    "Use this for the latest text-only session messages. Example: mc_session_tail({ sessionId: 'ses_123', limit: 10 }). Prefer this over mc_session_read when you only need the recent conversation.",
   mc_session_events:
     "Use this for recent live state, not full transcript history. Example: mc_session_events({ sessionId: 'ses_123', withChildren: true, limit: 25 }).",
   mc_session_search:
-    "Use this for indexed search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'ParentSessionScopeUnavailable', scope: 'global', exact: true }); mc_session_search({ query: 'relay failure', sessionId: 'ses_123' }). Prefer mc_session_read when you need raw tool outputs.",
+    "Use this for indexed search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'ParentSessionScopeUnavailable', scope: 'global', exact: true }); mc_session_search({ query: 'relay failure', sessionId: 'ses_123' }). Prefer mc_session_tail for recent text and mc_session_read only for deep transcript inspection.",
   mc_job_start:
     "Starts a background child session attached to the current parent session only. Examples: mc_job_start({ prompt: 'Summarize blockers in this session.' }); mc_job_start({ title: 'Search audit', prompt: 'Find mentions of global scope behavior.' }). Call it from the parent session you want to attach to. Automatic parent notifications depend on the current runtime supporting parent relay.",
   mc_job_status:
-    "Use this to inspect one background job, including any pending permission/question input and its latest stable result, if available. Example: mc_job_status({ jobId: 'job_123' }).",
+    "Use this to inspect one background job's compact current state. Example: mc_job_status({ jobId: 'job_123' }). Use mc_job_pending_input for blocked details and mc_job_result for the stored terminal summary.",
+  mc_job_pending_input:
+    "Use this when a job is blocked and you need the full actionable permission/question payload. Example: mc_job_pending_input({ jobId: 'job_123' }).",
   mc_job_events:
-    "Use this for the persisted job event feed, including lifecycle changes and child progress updates. Example: mc_job_events({ jobId: 'job_123', limit: 25 }).",
+    "Use this for the compact persisted job event timeline, including lifecycle changes and child progress updates. Example: mc_job_events({ jobId: 'job_123', limit: 25 }).",
   mc_job_list:
     "Use this to see recent jobs, optionally filtered by parent session or state. Example: mc_job_list({ sessionId: 'ses_123', state: 'running', limit: 10 }).",
   mc_job_update:
@@ -32,7 +36,7 @@ const TOOL_GUIDANCE: Record<string, string> = {
   mc_job_abort:
     "Use this from the parent session to stop an active background job. Example: mc_job_abort({ jobId: 'job_123' }).",
   mc_job_result:
-    "Use this to fetch a stable job snapshot. Example: mc_job_result({ jobId: 'job_123' }). Set sendToParent: true to re-send a stored result to the parent session; run that from the parent session that launched the job.",
+    "Use this to fetch the compact stable job summary after the job reaches a terminal or idle snapshot state. Example: mc_job_result({ jobId: 'job_123' }). Set sendToParent: true to re-send a stored result to the parent session; run that from the parent session that launched the job.",
 }
 
 export const applyMissionControlToolGuidance = (toolID: string, description: string) => {

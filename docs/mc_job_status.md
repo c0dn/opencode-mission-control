@@ -16,9 +16,9 @@ mc_job_status({ jobId: "job_123" })
 
 ## What it returns
 
-- `job` — the current tracked job record
-- `job.pendingInput` — optional pending permission/question request details when the child is blocked
-- `result` — optional stable result snapshot if one exists
+- `job` — the compact current tracked job view
+- `job.pendingKind` — whether the child is currently blocked on `permission` or `question`
+- `job.hasResult` — whether a stable result snapshot is available through `mc_job_result`
 
 Possible job states include:
 
@@ -35,4 +35,6 @@ Possible job states include:
 
 ## Caveats
 
-- `result` is only present after Mission Control captured a stable snapshot.
+- This does not inline the stored result snapshot.
+- Use `mc_job_pending_input` for full blocked permission/question details.
+- Use `mc_job_result` for the stored terminal summary.

@@ -24,6 +24,9 @@ export const DEFAULT_CONFIG: MissionControlConfig = {
     includeToolCalls: true,
     includeReasoningLabels: false,
   },
+  tools: {
+    surface: "full",
+  },
   jobs: {
     enabled: true,
     maxConcurrent: 2,
@@ -50,6 +53,10 @@ export const createMissionControlConfig = (
     observe: {
       ...DEFAULT_CONFIG.observe,
       ...overrides.observe,
+    },
+    tools: {
+      ...DEFAULT_CONFIG.tools,
+      ...overrides.tools,
     },
     jobs: {
       ...DEFAULT_CONFIG.jobs,
@@ -100,6 +107,7 @@ export const resolveMissionControlRuntime = (
         (publicSearchOptions.semanticEnabled ? "jina" : DEFAULT_CONFIG.search.semanticProvider),
     },
     observe: options.observe,
+    tools: options.tools,
     jobs: options.jobs,
     safety: options.safety,
     debug: options.debug,

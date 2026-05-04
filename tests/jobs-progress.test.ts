@@ -148,9 +148,8 @@ describe("MissionControl background job progress and event feed", () => {
         throw new Error("Expected progress update to succeed")
       }
 
-      expect(updateResult.data.event.type).toBe("job.progress")
-      expect(updateResult.data.event.detail).toBe("Checkpoint complete.")
-      expect(updateResult.data.job.state).toBe("running")
+      expect(updateResult.data.eventId).toEqual(expect.any(String))
+      expect(updateResult.data.state).toBe("running")
       expect(parentMessages).toHaveLength(expectedNotifications)
       if (notifyParent) {
         expect(parentMessages[0]).toContain("progress update")
@@ -161,7 +160,7 @@ describe("MissionControl background job progress and event feed", () => {
       if (!status.ok) {
         throw new Error("Expected progress-updated job status to exist")
       }
-      expect(status.data.result).toBeUndefined()
+      expect(status.data.job.hasResult).toBe(false)
     })
   }
 

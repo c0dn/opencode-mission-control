@@ -22,7 +22,17 @@ mc_job_list({ sessionId: "ses_123", state: "running", limit: 20 })
 
 ## What it returns
 
-A list of tracked jobs sorted by most recently updated first.
+A list of compact tracked job cards sorted by most recently updated first.
+
+Each card includes:
+
+- `jobId`
+- `title`
+- `state`
+- optional `childSessionId`
+- optional `pendingKind`
+- optional `failureReason`
+- `hasResult`
 
 ## Caveats
 

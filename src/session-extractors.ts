@@ -9,4 +9,4 @@ export {
   hasParentSessionReference,
 } from "./session-extractors/core.js"
 export { extractPermissionRequest, extractQuestionRequest } from "./session-extractors/pending-input.js"
-export { normalizeMessage } from "./session-extractors/transcript.js"
+export { extractTailText, hasVisibleTranscriptContent, normalizeMessage } from "./session-extractors/transcript.js"

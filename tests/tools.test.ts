@@ -65,6 +65,10 @@ describe("mc_session_read tool", () => {
             sessionId,
             entries: [],
             includedChildSessionIds: [],
+            offset: 0,
+            hasMore: false,
+            totalEntries: 0,
+            totalEntriesExact: true,
           },
         }
       },
@@ -72,13 +76,14 @@ describe("mc_session_read tool", () => {
 
     const readTool = tools.mc_session_read
     expect(Object.keys(readTool.args).sort()).toEqual(
-      ["beforeMessageId", "limit", "sessionId", "withChildren", "withToolOutputs"].sort(),
+      ["beforeMessageId", "limit", "offset", "sessionId", "withChildren", "withToolOutputs"].sort(),
     )
 
     await readTool.execute(
       {
         sessionId: "ses_123",
         beforeMessageId: "msg_7",
+        offset: 6,
         limit: 4,
         withChildren: true,
         withToolOutputs: false,
@@ -91,9 +96,60 @@ describe("mc_session_read tool", () => {
         sessionId: "ses_123",
         options: {
           beforeMessageId: "msg_7",
+          offset: 6,
           limit: 4,
           withChildren: true,
           withToolOutputs: false,
+        },
+      },
+    ])
+  })
+})
+
+describe("mc_session_tail tool", () => {
+  test("forwards compact text-only session tail args", async () => {
+    const calls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async tailSession(sessionId: string, options: unknown) {
+        calls.push({ sessionId, options })
+        return {
+          ok: true,
+          data: {
+            sessionId,
+            entries: [],
+            includedChildSessionIds: [],
+            offset: 0,
+            hasMore: false,
+            totalEntries: 0,
+            totalEntriesExact: true,
+          },
+        }
+      },
+    } as any)
+
+    expect(Object.keys(tools.mc_session_tail.args).sort()).toEqual(
+      ["limit", "offset", "sessionId", "withChildren"].sort(),
+    )
+
+    await tools.mc_session_tail.execute(
+      {
+        sessionId: "ses_123",
+        offset: 5,
+        limit: 10,
+        withChildren: true,
+      } as any,
+      {} as any,
+    )
+
+    expect(calls).toEqual([
+      {
+        sessionId: "ses_123",
+        options: {
+          offset: 5,
+          limit: 10,
+          withChildren: true,
         },
       },
     ])
@@ -201,25 +257,9 @@ describe("job tools", () => {
         return {
           ok: true,
           data: {
-            job: {
-              jobId: "job_123",
-              sessionId: "ses_parent",
-              title: "Background work",
-              prompt: "Do work",
-              state: "running",
-              createdAt: 1,
-              updatedAt: 2,
-              relayState: "pending",
-            },
-            event: {
-              eventId: "evt_1",
-              jobId: "job_123",
-              sessionId: "ses_parent",
-              type: "job.progress",
-              state: "running",
-              at: 2,
-              detail: "checkpoint",
-            },
+            jobId: "job_123",
+            state: "running",
+            eventId: "evt_1",
           },
         }
       },
@@ -256,6 +296,35 @@ describe("job tools", () => {
     ])
   })
 
+  test("mc_job_pending_input forwards the job id unchanged", async () => {
+    const calls: string[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      jobPendingInput(jobId: string) {
+        calls.push(jobId)
+        return {
+          ok: true,
+          data: {
+            jobId,
+            state: "running",
+            pendingInput: {
+              kind: "permission",
+              requestId: "per_1",
+              permission: "bash",
+              patterns: ["git push"],
+              always: [],
+            },
+          },
+        }
+      },
+    } as any)
+
+    expect(Object.keys(tools.mc_job_pending_input.args)).toEqual(["jobId"])
+    await tools.mc_job_pending_input.execute({ jobId: "job_123" } as any, {} as any)
+    expect(calls).toEqual(["job_123"])
+  })
+
   test("permission and question reply tools forward the public v2 args", async () => {
     const permissionCalls: unknown[] = []
     const questionCalls: unknown[] = []
@@ -284,5 +353,40 @@ describe("job tools", () => {
     expect(permissionCalls).toEqual([{ jobId: "job_123", reply: "once", message: "ok" }])
     expect(questionCalls).toEqual([{ jobId: "job_123", answers: [["src/"]] }])
     expect(rejectCalls).toEqual(["job_123"])
+  })
+
+  test("jobs-only tool surface excludes session inspection tools", () => {
+    const tools = createMissionControlTools({
+      config: {
+        ...DEFAULT_CONFIG,
+        tools: {
+          surface: "jobs-only",
+        },
+      },
+    } as any)
+
+    expect(tools.mc_job_status).toBeDefined()
+    expect(tools.mc_job_pending_input).toBeDefined()
+    expect(tools.mc_session_read).toBeUndefined()
+    expect(tools.mc_session_tail).toBeUndefined()
+    expect(tools.mc_session_search).toBeUndefined()
+  })
+
+  test("inspect-only tool surface excludes job orchestration tools", () => {
+    const tools = createMissionControlTools({
+      config: {
+        ...DEFAULT_CONFIG,
+        tools: {
+          surface: "inspect-only",
+        },
+      },
+    } as any)
+
+    expect(tools.mc_status).toBeDefined()
+    expect(tools.mc_session_read).toBeDefined()
+    expect(tools.mc_session_tail).toBeDefined()
+    expect(tools.mc_job_status).toBeUndefined()
+    expect(tools.mc_job_start).toBeUndefined()
+    expect(tools.mc_job_pending_input).toBeUndefined()
   })
 })

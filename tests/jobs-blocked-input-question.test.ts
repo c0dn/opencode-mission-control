@@ -88,7 +88,15 @@ describe("MissionControl background jobs blocked input - question", () => {
     }
 
     expect(status.data.job.state).toBe("waiting_question")
-    expect(status.data.job.pendingInput).toMatchObject({
+    expect(status.data.job.pendingKind).toBe("question")
+
+    const pendingInput = controller.pendingInput(launchResult.data.jobId)
+    expect(pendingInput.ok).toBe(true)
+    if (!pendingInput.ok) {
+      throw new Error("Expected question details to exist")
+    }
+
+    expect(pendingInput.data.pendingInput).toMatchObject({
       kind: "question",
       requestId: "question-1",
       questions: [
@@ -203,7 +211,7 @@ describe("MissionControl background jobs blocked input - question", () => {
     }
 
     expect(status.data.job.state).toBe("running")
-    expect(status.data.job.pendingInput).toBeUndefined()
+    expect(status.data.job.pendingKind).toBeUndefined()
   })
 
   test("rejects pending questions and finalizes the job", async () => {
@@ -288,8 +296,14 @@ describe("MissionControl background jobs blocked input - question", () => {
     }
 
     expect(status.data.job.state).toBe("failed")
-    expect(status.data.job.pendingInput).toBeUndefined()
-    expect(status.data.result?.summary).toContain("Question rejected")
+    expect(status.data.job.pendingKind).toBeUndefined()
+
+    const result = await controller.getResult(adapter, launchResult.data.jobId, false)
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected rejected-question result to exist")
+    }
+    expect(result.data.summary).toContain("Question rejected")
   })
 
   test("ignores stale question replies that do not match the current pending request", async () => {
@@ -353,7 +367,15 @@ describe("MissionControl background jobs blocked input - question", () => {
     }
 
     expect(status.data.job.state).toBe("waiting_question")
-    expect(status.data.job.pendingInput).toMatchObject({
+    expect(status.data.job.pendingKind).toBe("question")
+
+    const pendingInput = controller.pendingInput(launchResult.data.jobId)
+    expect(pendingInput.ok).toBe(true)
+    if (!pendingInput.ok) {
+      throw new Error("Expected stale-question details to exist")
+    }
+
+    expect(pendingInput.data.pendingInput).toMatchObject({
       kind: "question",
       requestId: "question-a",
     })
@@ -420,7 +442,15 @@ describe("MissionControl background jobs blocked input - question", () => {
     }
 
     expect(status.data.job.state).toBe("waiting_question")
-    expect(status.data.job.pendingInput).toMatchObject({
+    expect(status.data.job.pendingKind).toBe("question")
+
+    const pendingInput = controller.pendingInput(launchResult.data.jobId)
+    expect(pendingInput.ok).toBe(true)
+    if (!pendingInput.ok) {
+      throw new Error("Expected conflicting question details to exist")
+    }
+
+    expect(pendingInput.data.pendingInput).toMatchObject({
       kind: "question",
       requestId: "question-current",
     })
@@ -436,10 +466,6 @@ describe("MissionControl background jobs blocked input - question", () => {
         expect.objectContaining({
           type: "job.event_ignored",
           detail: "conflicting question request",
-          metadata: expect.objectContaining({
-            eventType: "question.asked",
-            ignoredRequestId: "question-stale",
-          }),
         }),
       ]),
     )

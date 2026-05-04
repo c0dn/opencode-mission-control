@@ -5,11 +5,14 @@ import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path"
 
 import type { MissionControlConfig } from "../types.js"
 
-import type { UnknownRecord } from "./raw-client.js"
+type UnknownRecord = Record<string, unknown>
 
 export type OpenCodeAdapterOptions = {
   rootDir?: string
+  directory?: string
   debug?: MissionControlConfig["debug"]
+  serverUrl?: URL | string
+  sdkClient?: unknown
 }
 
 export class DebugLogWriter {

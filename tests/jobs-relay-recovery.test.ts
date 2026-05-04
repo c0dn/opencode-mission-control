@@ -225,12 +225,15 @@ describe("MissionControl background jobs relay and recovery", () => {
     }
 
     expect(status.data.job.state).toBe("idle")
-    expect(status.data.job.relayState).toBe("failed")
-    expect(status.data.result?.summary).toContain("Finished work before relay failure")
+    expect(status.data.job.hasResult).toBe(true)
     expect(relayAttempts).toBe(1)
 
     const result = await controller.getResult(adapter, launchResult.data.jobId, false)
     expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected relay-failure result to exist")
+    }
+    expect(result.data.summary).toContain("Finished work before relay failure")
   })
 
   test("orphans unresolved idle jobs after restart instead of rebinding them live", async () => {
@@ -292,11 +295,15 @@ describe("MissionControl background jobs relay and recovery", () => {
     }
 
     expect(status.data.job.state).toBe("orphaned")
-    expect(status.data.result?.summary).toContain("Reached idle before restart")
+    expect(status.data.job.hasResult).toBe(true)
     expect(controller2.getActiveJobCount()).toBe(0)
 
     const result = await controller2.getResult(adapter, launchResult.data.jobId, false)
     expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected orphaned idle result to exist")
+    }
+    expect(result.data.summary).toContain("Reached idle before restart")
   })
 
   test("can re-send a stored result after restart when the job became orphaned", async () => {
@@ -503,7 +510,14 @@ describe("MissionControl background jobs relay and recovery", () => {
     }
 
     expect(idleStatus.data.job.state).toBe("idle")
-    expect(idleStatus.data.job.relayState).toBe("failed")
+    expect(idleStatus.data.job.hasResult).toBe(true)
+
+    const idleEvents = controller.jobEvents(launchResult.data.jobId, 10)
+    expect(idleEvents.ok).toBe(true)
+    if (!idleEvents.ok) {
+      throw new Error("Expected idle job events to exist")
+    }
+    expect(idleEvents.data.events.map((event) => event.type)).toContain("job.relay_failed")
 
     await controller.handleEvent(adapter, "message.updated", {
       sessionID: "child-resume-after-idle",
@@ -517,7 +531,7 @@ describe("MissionControl background jobs relay and recovery", () => {
     }
 
     expect(resumedStatus.data.job.state).toBe("running")
-    expect(resumedStatus.data.result).toBeUndefined()
+    expect(resumedStatus.data.job.hasResult).toBe(false)
     expect(controller.getActiveJobCount()).toBe(1)
 
     const resumedResult = await controller.getResult(adapter, launchResult.data.jobId, false)
@@ -656,7 +670,7 @@ describe("MissionControl background jobs relay and recovery", () => {
     }
 
     expect(status.data.job.state).toBe("running")
-    expect(status.data.result).toBeUndefined()
+    expect(status.data.job.hasResult).toBe(false)
   })
 
   test("auto-relays failed jobs to the parent", async () => {
@@ -717,7 +731,14 @@ describe("MissionControl background jobs relay and recovery", () => {
     }
 
     expect(status.data.job.state).toBe("failed")
-    expect(status.data.job.relayState).toBe("delivered")
+    expect(status.data.job.hasResult).toBe(true)
     expect(relayCount).toBe(1)
+
+    const events = controller.jobEvents(launchResult.data.jobId, 10)
+    expect(events.ok).toBe(true)
+    if (!events.ok) {
+      throw new Error("Expected failed-relay job events to exist")
+    }
+    expect(events.data.events.map((event) => event.type)).toContain("job.relay_delivered")
   })
 })

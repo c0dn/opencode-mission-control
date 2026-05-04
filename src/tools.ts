@@ -3,13 +3,15 @@ import type { ToolResult as PluginToolResult } from "@opencode-ai/plugin"
 
 import { clampResultLimit } from "./config.js"
 import type { MissionControlServer } from "./server.js"
+import type { MissionControlToolSurface } from "./types.js"
 
 const toPluginToolResult = (value: unknown): PluginToolResult => ({
   output: JSON.stringify(value, null, 2),
   metadata: value && typeof value === "object" ? (value as Record<string, unknown>) : { value },
 })
 
-export const createMissionControlTools = (server: MissionControlServer) => ({
+export const createMissionControlTools = (server: MissionControlServer) => {
+  const tools = {
   mc_status: tool({
     description: "Return mission-control runtime status",
     args: {},
@@ -23,6 +25,7 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     args: {
       sessionId: tool.schema.string(),
       beforeMessageId: tool.schema.string().optional(),
+      offset: tool.schema.number().optional(),
       limit: tool.schema.number().optional(),
       withChildren: tool.schema.boolean().optional(),
       withToolOutputs: tool.schema.boolean().optional(),
@@ -31,9 +34,29 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       return toPluginToolResult(
         await server.readSession(args.sessionId, {
           beforeMessageId: args.beforeMessageId,
+          offset: args.offset,
           limit: clampResultLimit(args.limit, server.config),
           withChildren: args.withChildren,
           withToolOutputs: args.withToolOutputs,
+        }),
+      )
+    },
+  }),
+
+  mc_session_tail: tool({
+    description: "Return the latest text-only session messages",
+    args: {
+      sessionId: tool.schema.string(),
+      offset: tool.schema.number().optional(),
+      limit: tool.schema.number().optional(),
+      withChildren: tool.schema.boolean().optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(
+        await server.tailSession(args.sessionId, {
+          offset: args.offset,
+          limit: clampResultLimit(args.limit, server.config),
+          withChildren: args.withChildren,
         }),
       )
     },
@@ -120,6 +143,16 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
     },
     async execute(args) {
       return toPluginToolResult(server.jobStatus(args.jobId))
+    },
+  }),
+
+  mc_job_pending_input: tool({
+    description: "Return detailed blocked permission/question input for one job",
+    args: {
+      jobId: tool.schema.string(),
+    },
+    async execute(args) {
+      return toPluginToolResult(server.jobPendingInput(args.jobId))
     },
   }),
 
@@ -290,4 +323,40 @@ export const createMissionControlTools = (server: MissionControlServer) => ({
       )
     },
   }),
-})
+  }
+
+  return selectToolsForSurface(tools, server.config.tools.surface)
+}
+
+const selectToolsForSurface = <T extends Record<string, unknown>>(tools: T, surface: MissionControlToolSurface): T => {
+  if (surface === "full") {
+    return tools
+  }
+
+  const allowed =
+    surface === "jobs-only"
+      ? new Set([
+          "mc_status",
+          "mc_job_start",
+          "mc_job_status",
+          "mc_job_pending_input",
+          "mc_job_events",
+          "mc_job_list",
+          "mc_job_update",
+          "mc_job_permission_reply",
+          "mc_job_question_reply",
+          "mc_job_question_reject",
+          "mc_job_abort",
+          "mc_job_result",
+        ])
+      : new Set([
+          "mc_status",
+          "mc_session_read",
+          "mc_session_tail",
+          "mc_session_tree",
+          "mc_session_events",
+          "mc_session_search",
+        ])
+
+  return Object.fromEntries(Object.entries(tools).filter(([toolName]) => allowed.has(toolName))) as T
+}

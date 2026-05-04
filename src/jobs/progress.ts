@@ -1,5 +1,5 @@
 import type { OpenCodeAdapter } from "../opencode-client.js"
-import { isClosedJobState, toPublicJob, toPublicJobEvent } from "../job-helpers.js"
+import { isClosedJobState } from "../job-helpers.js"
 import type {
   BackgroundJob,
   JobLifecycleEvent,
@@ -119,13 +119,15 @@ export const updateProgress = async (
     })
 
     return ok({
-      job: toPublicJob(job),
-      event: toPublicJobEvent(event),
+      jobId: job.jobID,
+      state: job.state,
+      eventId: event.eventID,
     })
   }
 
   return ok({
-    job: toPublicJob(job),
-    event: toPublicJobEvent(event),
+    jobId: job.jobID,
+    state: job.state,
+    eventId: event.eventID,
   })
 }

@@ -1,10 +1,17 @@
 import type { OpenCodeAdapter } from "../opencode-client.js"
-import { canExposeStoredResult, toPublicJob, toPublicJobEvent, toPublicJobResult } from "../job-helpers.js"
+import {
+  canExposeStoredResult,
+  toPublicJob,
+  toPublicJobEvent,
+  toPublicJobResult,
+  toPublicPendingInput,
+} from "../job-helpers.js"
 import type {
   BackgroundJob,
   JobEventsResult,
   JobLifecycleEvent,
   JobListArgs,
+  JobPendingInputResult,
   JobResultSnapshot,
   JobStatusResult,
   ToolCallerContext,
@@ -30,13 +37,17 @@ export interface JobQueryRuntime {
   ): Promise<string | ToolFailure>
 }
 
-export const listJobs = (runtime: Pick<JobQueryRuntime, "jobs">, args: JobListArgs = {}) => {
+export const listJobs = (runtime: Pick<JobQueryRuntime, "jobs" | "results">, args: JobListArgs = {}) => {
   const jobs = Array.from(runtime.jobs.values())
     .filter((job) => (args.sessionId ? job.parentSessionID === args.sessionId : true))
     .filter((job) => (args.state ? job.state === args.state : true))
     .sort((left, right) => right.updatedAt - left.updatedAt)
 
-  return ok(jobs.slice(0, args.limit ?? 20).map(toPublicJob))
+  return ok(
+    jobs.slice(0, args.limit ?? 20).map((job) =>
+      toPublicJob(job, canExposeStoredResult(job.state, runtime.results.has(job.jobID))),
+    ),
+  )
 }
 
 export const status = (runtime: Pick<JobQueryRuntime, "jobs" | "results">, jobID: string): ToolResult<JobStatusResult> => {
@@ -48,8 +59,32 @@ export const status = (runtime: Pick<JobQueryRuntime, "jobs" | "results">, jobID
   const storedResult = runtime.results.get(jobID)
 
   return ok({
-    job: toPublicJob(job),
-    result: canExposeStoredResult(job.state, Boolean(storedResult)) ? toPublicJobResult(storedResult) : undefined,
+    job: toPublicJob(job, canExposeStoredResult(job.state, Boolean(storedResult))),
+  })
+}
+
+export const pendingInput = (
+  runtime: Pick<JobQueryRuntime, "jobs">,
+  jobID: string,
+): ToolResult<JobPendingInputResult> => {
+  const job = runtime.jobs.get(jobID)
+  if (!job) {
+    return fail("JobNotFound", `Job '${jobID}' was not found.`)
+  }
+
+  const pending = toPublicPendingInput(job)
+  if (!pending) {
+    return fail(
+      "JobLaunchFailed",
+      `Job '${jobID}' does not have actionable pending input details right now.`,
+      "Use mc_job_status to inspect the current state and retry this tool if the job becomes blocked again.",
+    )
+  }
+
+  return ok({
+    jobId: jobID,
+    state: job.state,
+    pendingInput: pending,
   })
 }
 

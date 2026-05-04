@@ -159,10 +159,9 @@ export class MissionControlJobLauncher {
       })
 
       if (job && this.controller.status(job.jobID).ok) {
-        const currentStatus = this.controller.status(job.jobID)
-        if (currentStatus.ok && currentStatus.data.job.childSessionId) {
+        if (job.childSessionID) {
           try {
-            await adapter.abortSession(currentStatus.data.job.childSessionId, currentStatus.data.job.childDirectory)
+            await adapter.abortSession(job.childSessionID, job.childDirectory)
             await this.controller.markLaunchFailed(job.jobID, message)
           } catch {
             await this.controller.markOrphaned(

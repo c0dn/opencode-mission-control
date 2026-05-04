@@ -8,6 +8,7 @@ export type ParentResolutionMode =
 
 export type PermissionReplyMode = "once" | "always" | "reject"
 export type PendingInputKind = "permission" | "question"
+export type MissionControlToolSurface = "full" | "jobs-only" | "inspect-only"
 
 export type JobState =
   | "queued"
@@ -55,6 +56,9 @@ export interface MissionControlConfig {
     eventBufferSize: number
     includeToolCalls: boolean
     includeReasoningLabels: boolean
+  }
+  tools: {
+    surface: MissionControlToolSurface
   }
   jobs: {
     enabled: boolean
@@ -186,7 +190,6 @@ export interface ParentRelayPayload {
 
 export interface JobStatusResult {
   job: MissionControlJob
-  result?: MissionControlJobResult
 }
 
 export interface JobEventsResult {
@@ -255,6 +258,7 @@ export type ToolResult<T> = ToolSuccess<T> | ToolFailure
 export interface MissionControlCapabilityMatrix {
   search: {
     sessionRead: boolean
+    sessionTail: boolean
     sessionTree: boolean
     indexedRetrieval: boolean
     semanticRetrieval: boolean
@@ -272,6 +276,7 @@ export interface MissionControlCapabilityMatrix {
     permissionReply: boolean
     questionReply: boolean
     questionReject: boolean
+    pendingInputDetails: boolean
     parentReplies: boolean
     eventFeed: boolean
     progressUpdates: boolean
@@ -326,9 +331,11 @@ export interface MissionControlStatus {
   directory: string
   implemented: {
     sessionRead: boolean
+    sessionTail: boolean
     sessionTree: boolean
     sessionObserve: boolean
     sessionSearch: boolean
+    jobPendingInput: boolean
     jobStart: boolean
   }
   config: MissionControlConfig
@@ -395,6 +402,7 @@ export interface MissionControlPluginOptions {
     jinaApiKey?: string
   }
   observe?: Partial<MissionControlConfig["observe"]>
+  tools?: Partial<MissionControlConfig["tools"]>
   jobs?: Partial<MissionControlConfig["jobs"]>
   safety?: Partial<MissionControlConfig["safety"]>
   debug?: Partial<MissionControlConfig["debug"]>
@@ -410,6 +418,31 @@ export interface SessionReadResult {
   sessionId: string
   entries: SessionTranscriptEntry[]
   includedChildSessionIds: string[]
+  offset: number
+  hasMore: boolean
+  nextOffset?: number
+  totalEntries: number
+  totalEntriesExact: boolean
+}
+
+export interface SessionTailEntry {
+  sessionId: string
+  messageId: string
+  role: string
+  agent?: string
+  createdAt: number
+  text: string
+}
+
+export interface SessionTailResult {
+  sessionId: string
+  entries: SessionTailEntry[]
+  includedChildSessionIds: string[]
+  offset: number
+  hasMore: boolean
+  nextOffset?: number
+  totalEntries: number
+  totalEntriesExact: boolean
 }
 
 export interface SessionTreeNode {
@@ -433,35 +466,20 @@ export interface SessionObserveResult {
 
 export interface MissionControlJob {
   jobId: string
-  sessionId: string
-  parentDirectory?: string
-  childSessionId?: string
-  childDirectory?: string
   title: string
-  prompt: string
   state: JobState
-  createdAt: number
-  updatedAt: number
-  launchedAt?: number
-  completedAt?: number
+  childSessionId?: string
+  pendingKind?: PendingInputKind
   failureReason?: string
-  lastObservedEvent?: string
-  lastSourceUpdatedAt?: number
-  relayState: "pending" | "delivered" | "failed"
-  pendingInput?: JobPendingInput
+  hasResult: boolean
 }
 
 export interface MissionControlJobEvent {
-  eventId: string
-  jobId: string
-  sessionId: string
-  childSessionId?: string
+  at: number
   type: string
   state: JobState
-  previousState?: JobState
-  at: number
   detail?: string
-  metadata?: Record<string, unknown>
+  requestId?: string
 }
 
 export interface MissionControlJobResult {
@@ -472,13 +490,43 @@ export interface MissionControlJobResult {
   summary: string
   blockers: string[]
   recommendedNextStep?: string
-  keyMessageIds: string[]
-  observedAt: number
+}
+
+export interface MissionControlPendingPermissionInput {
+  kind: "permission"
+  requestId: string
+  permission: string
+  patterns: string[]
+  always: string[]
+  reason?: string
+}
+
+export interface MissionControlPendingQuestionInput {
+  kind: "question"
+  requestId: string
+  questions: JobPendingQuestionInfo[]
+}
+
+export type MissionControlPendingInput =
+  | MissionControlPendingPermissionInput
+  | MissionControlPendingQuestionInput
+
+export interface JobPendingInputResult {
+  jobId: string
+  state: JobState
+  pendingInput: MissionControlPendingInput
+}
+
+export interface JobActionResult {
+  jobId: string
+  state: JobState
+  failureReason?: string
 }
 
 export interface JobProgressUpdateResult {
-  job: MissionControlJob
-  event: MissionControlJobEvent
+  jobId: string
+  state: JobState
+  eventId: string
 }
 
 export type DeepPartial<T> = {
