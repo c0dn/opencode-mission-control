@@ -1,7 +1,8 @@
 import { extractDirectory, extractSessionID, extractSessionTimestamp } from "../session-extractors.js"
 
 import type { ToolCallerContext } from "../types.js"
-import type { UnknownRecord } from "./raw-client.js"
+
+type UnknownRecord = Record<string, unknown>
 
 export class GlobalSessionDiscoveryError extends Error {
   constructor(message = "Global session discovery is unavailable") {
