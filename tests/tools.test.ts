@@ -29,11 +29,10 @@ describe("mc_session_search tool", () => {
     } as any)
 
     const searchTool = tools.mc_session_search
-    expect(Object.keys(searchTool.args).sort()).toEqual(["exact", "limit", "query", "scope", "sessionId"].sort())
+    expect(Object.keys(searchTool.args).sort()).toEqual(["exact", "limit", "query", "scope"].sort())
 
     await searchTool.execute({
       query: "CTF",
-      sessionId: "ses_123",
       scope: "global",
       exact: true,
       limit: 7,
@@ -42,12 +41,63 @@ describe("mc_session_search tool", () => {
     expect(calls).toEqual([
         {
           query: "CTF",
-          sessionId: "ses_123",
           scope: "global",
           exact: true,
           limit: 7,
         },
     ])
+  })
+})
+
+describe("session metadata lookup tools", () => {
+  test("mc_session_get forwards a session id and returns metadata only", async () => {
+    const calls: string[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async getSession(sessionId: string) {
+        calls.push(sessionId)
+        return {
+          ok: true,
+          data: {
+            session: {
+              sessionId,
+              title: "Build notes",
+              directory: "/tmp/project",
+            },
+          },
+        }
+      },
+    } as any)
+
+    expect(Object.keys(tools.mc_session_get.args)).toEqual(["sessionId"])
+    await tools.mc_session_get.execute({ sessionId: "ses_123" } as any, {} as any)
+    expect(calls).toEqual(["ses_123"])
+  })
+
+  test("mc_session_find forwards exact-title lookup args", async () => {
+    const calls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async findSessions(args: unknown) {
+        calls.push(args)
+        return {
+          ok: true,
+          data: {
+            title: "Build notes",
+            scope: "global",
+            candidates: [],
+            ambiguous: false,
+          },
+        }
+      },
+    } as any)
+
+    expect(Object.keys(tools.mc_session_find.args).sort()).toEqual(["limit", "scope", "title"].sort())
+    await tools.mc_session_find.execute({ title: "Build notes", scope: "global", limit: 3 } as any, {} as any)
+
+    expect(calls).toEqual([{ title: "Build notes", scope: "global", limit: 3 }])
   })
 })
 
@@ -368,6 +418,8 @@ describe("job tools", () => {
     expect(tools.mc_job_status).toBeDefined()
     expect(tools.mc_job_pending_input).toBeDefined()
     expect(tools.mc_session_read).toBeUndefined()
+    expect(tools.mc_session_get).toBeUndefined()
+    expect(tools.mc_session_find).toBeUndefined()
     expect(tools.mc_session_tail).toBeUndefined()
     expect(tools.mc_session_search).toBeUndefined()
   })
@@ -384,6 +436,8 @@ describe("job tools", () => {
 
     expect(tools.mc_status).toBeDefined()
     expect(tools.mc_session_read).toBeDefined()
+    expect(tools.mc_session_get).toBeDefined()
+    expect(tools.mc_session_find).toBeDefined()
     expect(tools.mc_session_tail).toBeDefined()
     expect(tools.mc_job_status).toBeUndefined()
     expect(tools.mc_job_start).toBeUndefined()

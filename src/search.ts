@@ -1,11 +1,12 @@
 import { MissionControlIndexDB } from "./index-db.js"
 import type { SearchIndexDocument, SearchIndexSessionCursor } from "./index-db.js"
 import { buildSessionChunks } from "./normalize.js"
-import { combineHybridMatches, hasExactLexicalMatch } from "./search/lexical.js"
+import { fuseHybridMatchesRrf } from "./search/hybrid.js"
+import { compareSearchMatches, matchFtsCandidates, scoreLexicalChunk } from "./search/lexical.js"
 import { resolveMode, selectRequestedMode } from "./search/mode-selection.js"
 import { normalizeSearchQuery, tokenize } from "./search/query.js"
 import { addExactCandidateWarning, buildScopedSearchView } from "./search/scope.js"
-import { ensureSemanticQueryVector, ensureSemanticVectors, scoreSemantically } from "./search/semantic.js"
+import { buildSemanticCandidateMatches, ensureSemanticQueryVector, ensureSemanticVectors, scoreSemantically } from "./search/semantic.js"
 import { GlobalSessionDiscoveryError, type OpenCodeAdapter } from "./opencode-client.js"
 import { MissionControlRuntimeState } from "./runtime-state.js"
 import { MissionControlSourceDB } from "./source-db.js"
@@ -66,7 +67,10 @@ export class MissionControlSearchService {
       )
     }
 
-    const indexDB = new MissionControlIndexDB(rootDir, config.search.indexPath, discovery.scope)
+    const indexDB = new MissionControlIndexDB(rootDir, config.search.indexPath, discovery.scope, {
+      vectorExtensionPaths: config.search.vectorExtensionPaths,
+      vectorBackend: config.search.vectorBackend,
+    })
     const existing = await indexDB.load()
     const indexSettings = {
       includeToolOutputsForIndexing: config.search.includeToolOutputsForIndexing,
@@ -123,9 +127,11 @@ export class MissionControlSearchService {
       args,
       queryTerms,
       normalizedQuery,
-      config.search.lexicalEnabled,
+      false,
     )
-    const lexicalMatches = initialScope.lexicalMatches
+    const lexicalMatches = config.search.lexicalEnabled
+      ? await this.getLexicalMatches(indexDB, index, initialScope, args, normalizedQuery, queryTerms, config.search.vectorSearchLimit)
+      : []
 
     if (effectiveMode === "lexical") {
       const matches = lexicalMatches.slice(0, args.limit ?? config.search.defaultResultLimit)
@@ -176,20 +182,33 @@ export class MissionControlSearchService {
         args,
         queryTerms,
         normalizedQuery,
-        config.search.lexicalEnabled,
+        false,
       )
-      const semanticMatches = scoreSemantically(
-        finalScope.scopedChunks,
-        finalScope.sessionMap,
-        queryEmbedding.index.semantic?.vectors ?? {},
-        queryEmbedding.vector,
-        normalizedQuery,
-      )
+      const chunksByID = new Map(finalScope.scopedChunks.map((chunk) => [chunk.chunkID, chunk]))
+      const semanticCandidates = queryEmbedding.index.semantic
+        ? await indexDB.querySemanticCandidates({
+            scope: queryEmbedding.index.discovery.scope,
+            signature: queryEmbedding.index.semantic.signature,
+            queryVector: queryEmbedding.vector,
+            limit: config.search.vectorSearchLimit,
+            sessionIDs: Array.from(new Set(finalScope.scopedChunks.map((chunk) => chunk.sessionID))),
+            vectorBackend: config.search.vectorBackend,
+          })
+        : []
+      const semanticMatches = semanticCandidates.length > 0
+        ? buildSemanticCandidateMatches(semanticCandidates, chunksByID, finalScope.sessionMap, normalizedQuery)
+        : scoreSemantically(
+            finalScope.scopedChunks,
+            finalScope.sessionMap,
+            queryEmbedding.index.semantic?.vectors ?? {},
+            queryEmbedding.vector,
+            normalizedQuery,
+          )
 
       const matches =
         effectiveMode === "semantic"
           ? semanticMatches
-          : combineHybridMatches(finalScope.lexicalMatches, semanticMatches)
+          : fuseHybridMatchesRrf(lexicalMatches, semanticMatches)
 
       const limitedMatches = matches.slice(0, args.limit ?? config.search.defaultResultLimit)
       addExactCandidateWarning(args, warnings, limitedMatches)
@@ -353,6 +372,36 @@ export class MissionControlSearchService {
       existing.settings.includeToolOutputsForIndexing === settings.includeToolOutputsForIndexing &&
       Array.isArray(existing.cursors)
     )
+  }
+
+  private async getLexicalMatches(
+    indexDB: MissionControlIndexDB,
+    index: SearchIndexDocument,
+    scopeView: ReturnType<typeof buildScopedSearchView>,
+    args: SearchExecutionArgs,
+    normalizedQuery: string,
+    queryTerms: string[],
+    candidateLimit: number,
+  ) {
+    const chunksByID = new Map(scopeView.scopedChunks.map((chunk) => [chunk.chunkID, chunk]))
+    const sessionIDs = Array.from(new Set(scopeView.scopedChunks.map((chunk) => chunk.sessionID)))
+    const ftsCandidates = await indexDB.queryFtsCandidates({
+      scope: index.discovery.scope,
+      query: normalizedQuery,
+      limit: Math.max(args.limit ?? 0, candidateLimit),
+      sessionIDs,
+    })
+    const sessionTitles = new Map(index.sessions.map((session) => [session.sessionID, session.title]))
+    const ftsMatches = matchFtsCandidates(ftsCandidates, chunksByID, sessionTitles, normalizedQuery)
+
+    if (ftsMatches.length > 0) {
+      return ftsMatches
+    }
+
+    return scopeView.scopedChunks
+      .map((chunk) => scoreLexicalChunk(chunk, sessionTitles.get(chunk.sessionID), queryTerms, normalizedQuery))
+      .filter((match): match is SessionSearchMatch => Boolean(match))
+      .sort(compareSearchMatches)
   }
 
 }

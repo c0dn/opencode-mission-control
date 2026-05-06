@@ -1,12 +1,14 @@
 import type { Database } from "bun:sqlite"
 
+import { dot } from "../search/fingerprint.js"
 import type { SourceSessionRecord } from "../source-db.js"
 import type { MissionControlSqliteDatabase } from "../storage/sqlite.js"
-import type { SessionChunk, SessionDiscoveryScope } from "../types.js"
+import type { NativeVectorBackendName, SessionChunk, SessionDiscoveryScope, VectorBackendName, VectorBackendPreference } from "../types.js"
 import type { SearchIndexDocument, SearchIndexSessionCursor } from "./types.js"
 
 export interface SqliteSearchStoreOptions {
   sqlite: MissionControlSqliteDatabase | Database
+  vectorBackend?: VectorBackendPreference
 }
 
 export interface FtsCandidateQueryOptions {
@@ -22,6 +24,21 @@ export interface FtsCandidate {
   rank: number
 }
 
+export interface SemanticCandidateQueryOptions {
+  scope: SessionDiscoveryScope
+  signature: string
+  queryVector: number[]
+  limit?: number
+  sessionIDs?: Iterable<string>
+  vectorBackend?: VectorBackendPreference
+}
+
+export interface SemanticCandidate {
+  chunkID: string
+  score: number
+  backend: VectorBackendName
+}
+
 type BindValue = string | number | null
 
 const SEARCH_SCHEMA_MIGRATION_ID = "search-index-store-v1"
@@ -29,9 +46,13 @@ const DEFAULT_FTS_LIMIT = 100
 
 export class SqliteSearchIndexStore {
   private readonly database: Database
+  private readonly sqlite?: MissionControlSqliteDatabase
+  private readonly vectorBackend: VectorBackendPreference
 
   constructor(options: SqliteSearchStoreOptions) {
     this.database = "database" in options.sqlite ? options.sqlite.database : options.sqlite
+    this.sqlite = "database" in options.sqlite ? options.sqlite : undefined
+    this.vectorBackend = options.vectorBackend ?? "auto"
   }
 
   ensureSchema() {
@@ -364,6 +385,26 @@ export class SqliteSearchIndexStore {
     }
   }
 
+  querySemanticCandidates(options: SemanticCandidateQueryOptions): SemanticCandidate[] {
+    this.ensureSchema()
+    const limit = Math.max(1, Math.trunc(options.limit ?? DEFAULT_FTS_LIMIT))
+    const sessionIDs = options.sessionIDs === undefined ? undefined : Array.from(new Set(options.sessionIDs)).filter(Boolean)
+
+    if (options.queryVector.length === 0 || sessionIDs?.length === 0) {
+      return []
+    }
+
+    const nativeBackend = this.selectNativeVectorBackend(options.vectorBackend ?? "auto")
+    if (nativeBackend) {
+      const nativeCandidates = this.queryNativeSemanticCandidates(nativeBackend, options, limit, sessionIDs)
+      if (nativeCandidates && nativeCandidates.length > 0) {
+        return nativeCandidates
+      }
+    }
+
+    return this.queryBlobSemanticCandidates(options, limit, sessionIDs)
+  }
+
   private clearSnapshotRows(scope: SessionDiscoveryScope) {
     for (const table of [
       "chunks_fts",
@@ -472,6 +513,8 @@ export class SqliteSearchIndexStore {
       )
     }
 
+    this.writeNativeSemanticVectorsBestEffort(index)
+
     const insertQuery = this.database.prepare(`
       INSERT INTO semantic_query_cache (scope, signature, query_key, query_text, vector_json, updated_at)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -485,6 +528,116 @@ export class SqliteSearchIndexStore {
     return this.database
       .prepare("SELECT session_id, dirty_at FROM dirty_sessions WHERE scope = ? ORDER BY session_id ASC")
       .all(scope) as DirtySessionRow[]
+  }
+
+  private selectNativeVectorBackend(preference: VectorBackendPreference): NativeVectorBackendName | undefined {
+    if (preference === "blob-scan") {
+      return undefined
+    }
+
+    const candidates: NativeVectorBackendName[] = preference === "auto" ? ["sqlite-vec", "vec1"] : [preference]
+    return candidates.find((backend) => this.sqlite?.getExtensionProbe(backend)?.available)
+  }
+
+  private writeNativeSemanticVectorsBestEffort(index: SearchIndexDocument) {
+    const semantic = index.semantic
+    if (!semantic) {
+      return
+    }
+
+    const firstVector = Object.values(semantic.vectors).find((vector) => Array.isArray(vector) && vector.length > 0)
+    if (!firstVector) {
+      return
+    }
+
+    const backend = this.selectNativeVectorBackend(this.vectorBackend)
+    if (!backend) {
+      return
+    }
+
+    const tableName = getNativeVectorTableName(backend, firstVector.length)
+    try {
+      this.createNativeVectorTable(backend, tableName, firstVector.length)
+      this.database.prepare(`DELETE FROM ${tableName} WHERE scope = ? AND signature = ?`).run(index.discovery.scope, semantic.signature)
+      const insert = this.database.prepare(`INSERT INTO ${tableName} (scope, signature, chunk_id, embedding) VALUES (?, ?, ?, ?)`)
+      for (const [chunkID, vector] of Object.entries(semantic.vectors)) {
+        if (vector.length !== firstVector.length) {
+          continue
+        }
+        insert.run(index.discovery.scope, semantic.signature, chunkID, serializeVectorForNative(vector))
+      }
+    } catch {
+      // Native vector support is optional; JSON vector rows remain the source of truth.
+    }
+  }
+
+  private queryNativeSemanticCandidates(
+    backend: NativeVectorBackendName,
+    options: SemanticCandidateQueryOptions,
+    limit: number,
+    sessionIDs: string[] | undefined,
+  ): SemanticCandidate[] | undefined {
+    const dimensions = options.queryVector.length
+    const tableName = getNativeVectorTableName(backend, dimensions)
+    try {
+      this.createNativeVectorTable(backend, tableName, dimensions)
+      const sessionFilter = sessionIDs ? `AND c.session_id IN (${sessionIDs.map(() => "?").join(", ")})` : ""
+      const rows = this.database
+        .prepare(`
+          SELECT v.chunk_id AS chunkID, v.distance AS distance
+          FROM ${tableName} v
+          JOIN chunks c ON c.scope = v.scope AND c.chunk_id = v.chunk_id
+          WHERE v.embedding MATCH ? AND k = ? AND v.scope = ? AND v.signature = ? ${sessionFilter}
+          ORDER BY v.distance ASC
+          LIMIT ?
+        `)
+        .all(serializeVectorForNative(options.queryVector), limit, options.scope, options.signature, ...(sessionIDs ?? []), limit) as NativeVectorCandidateRow[]
+
+      return rows.map((row) => ({
+        chunkID: row.chunkID,
+        score: 1 / (1 + Math.max(0, row.distance)),
+        backend,
+      }))
+    } catch {
+      return undefined
+    }
+  }
+
+  private queryBlobSemanticCandidates(
+    options: SemanticCandidateQueryOptions,
+    limit: number,
+    sessionIDs: string[] | undefined,
+  ): SemanticCandidate[] {
+    const sessionFilter = sessionIDs ? `AND c.session_id IN (${sessionIDs.map(() => "?").join(", ")})` : ""
+    const rows = this.database
+      .prepare(`
+        SELECT m.chunk_id AS chunkID, m.vector_json AS vectorJson
+        FROM semantic_vector_meta m
+        JOIN chunks c ON c.scope = m.scope AND c.chunk_id = m.chunk_id
+        WHERE m.scope = ? AND m.signature = ? ${sessionFilter}
+      `)
+      .all(options.scope, options.signature, ...(sessionIDs ?? [])) as VectorScanRow[]
+
+    return rows
+      .map((row) => ({
+        chunkID: row.chunkID,
+        score: dot(options.queryVector, parseNumberArray(row.vectorJson)),
+        backend: "blob-scan" as const,
+      }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, limit)
+  }
+
+  private createNativeVectorTable(backend: NativeVectorBackendName, tableName: string, dimensions: number) {
+    const moduleName = backend === "sqlite-vec" ? "vec0" : "vec1"
+    this.database.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS ${tableName} USING ${moduleName}(
+        scope TEXT,
+        signature TEXT,
+        chunk_id TEXT PRIMARY KEY,
+        embedding float[${dimensions}]
+      )
+    `)
   }
 
   private readFilteredDirtySessions(scope: SessionDiscoveryScope, filter: Iterable<string>) {
@@ -541,8 +694,13 @@ const toSafeFtsQuery = (query: string): string | undefined => {
     return undefined
   }
 
-  return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" ")
+  return terms.map((term) => `"${term.replaceAll('"', '""')}"`).join(" OR ")
 }
+
+const getNativeVectorTableName = (backend: NativeVectorBackendName, dimensions: number) =>
+  `semantic_vectors_native_${backend.replace(/[^a-z0-9_]/gi, "_")}_${Math.max(1, Math.trunc(dimensions))}`
+
+const serializeVectorForNative = (vector: number[]) => JSON.stringify(vector)
 
 const parseNumberArray = (json: string): number[] => {
   try {
@@ -631,6 +789,16 @@ interface VectorMetaRow {
   chunk_id: string
   fingerprint: string
   vector_json: string
+}
+
+interface NativeVectorCandidateRow {
+  chunkID: string
+  distance: number
+}
+
+interface VectorScanRow {
+  chunkID: string
+  vectorJson: string
 }
 
 interface QueryMetaRow {

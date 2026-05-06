@@ -562,6 +562,46 @@ describe("MissionControlSearchService", () => {
     expect(result.data.matches).toHaveLength(1)
   })
 
+  test("does not return title-only lexical matches", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          return [
+            {
+              id: "title-only-session",
+              directory,
+              title: "UniqueTitleOnlyToken",
+              time: { created: 1, updated: 10 },
+            },
+          ]
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "message-title-only", role: "assistant", time: { created: 5 } },
+              parts: [{ id: "part-title-only", type: "text", text: "ordinary transcript content" }],
+            },
+          ]
+        },
+      },
+    })
+
+    const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const result = await service.search(adapter, DEFAULT_CONFIG, directory, {
+      query: "UniqueTitleOnlyToken",
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected title-only lexical search to succeed")
+    }
+
+    expect(result.data.matches).toHaveLength(0)
+  })
+
   test("forces lexical retrieval when exact is requested", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
@@ -607,10 +647,23 @@ describe("MissionControlSearchService", () => {
       },
     })
     const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    let queryCalls = 0
+    const provider: SemanticEmbeddingProvider = {
+      name: "jina",
+      isAvailable: () => true,
+      availabilityWarning: () => undefined,
+      signature: () => "exact-provider",
+      embedQuery: async () => {
+        queryCalls += 1
+        return [1, 0]
+      },
+      embedPassages: async (texts: string[]) => texts.map(() => [1, 0]),
+    }
+
     const result = await service.search(adapter, config, directory, {
       query: "HTX",
       exact: true,
-    })
+    }, provider)
 
     expect(result.ok).toBe(true)
     if (!result.ok) {
@@ -621,6 +674,7 @@ describe("MissionControlSearchService", () => {
     expect(result.data.effectiveMode).toBe("lexical")
     expect(result.data.matches).toHaveLength(1)
     expect(result.data.matches[0]?.matchType).toBe("exact")
+    expect(queryCalls).toBe(0)
   })
 
   test("warns when exact mode only finds ranked lexical candidates", async () => {
@@ -789,7 +843,7 @@ describe("MissionControlSearchService", () => {
     expect(result.data.warnings).toEqual([])
   })
 
-  test("auto-selects lexical retrieval for bare acronym queries", async () => {
+  test("auto-selects hybrid retrieval for bare acronym queries when semantic is available", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
@@ -834,22 +888,30 @@ describe("MissionControlSearchService", () => {
       },
     })
     const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const provider: SemanticEmbeddingProvider = {
+      name: "jina",
+      isAvailable: () => true,
+      availabilityWarning: () => undefined,
+      signature: () => "acronym-provider",
+      embedQuery: async () => [1, 0],
+      embedPassages: async (texts: string[]) => texts.map(() => [1, 0]),
+    }
     const result = await service.search(adapter, config, directory, {
       query: "HTX",
-    })
+    }, provider)
 
     expect(result.ok).toBe(true)
     if (!result.ok) {
       throw new Error("Expected acronym lexical search to succeed")
     }
 
-    expect(result.data.requestedMode).toBe("lexical")
-    expect(result.data.effectiveMode).toBe("lexical")
+    expect(result.data.requestedMode).toBe("hybrid")
+    expect(result.data.effectiveMode).toBe("hybrid")
     expect(result.data.matches).toHaveLength(1)
     expect(result.data.matches[0]?.matchType).toBe("exact")
   })
 
-  test("treats quoted queries as exact lexical phrases without requiring literal quotes in content", async () => {
+  test("normalizes quoted queries while still using automatic hybrid retrieval", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
@@ -894,21 +956,29 @@ describe("MissionControlSearchService", () => {
       },
     })
     const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const provider: SemanticEmbeddingProvider = {
+      name: "jina",
+      isAvailable: () => true,
+      availabilityWarning: () => undefined,
+      signature: () => "quoted-provider",
+      embedQuery: async () => [1, 0],
+      embedPassages: async (texts: string[]) => texts.map(() => [1, 0]),
+    }
     const result = await service.search(adapter, config, directory, {
       query: '"indexing status"',
-    })
+    }, provider)
 
     expect(result.ok).toBe(true)
     if (!result.ok) {
       throw new Error("Expected quoted lexical search to succeed")
     }
 
-    expect(result.data.requestedMode).toBe("lexical")
-    expect(result.data.effectiveMode).toBe("lexical")
+    expect(result.data.requestedMode).toBe("hybrid")
+    expect(result.data.effectiveMode).toBe("hybrid")
     expect(result.data.matches).toHaveLength(1)
   })
 
-  test("uses semantic embeddings when a provider is available", async () => {
+  test("uses hybrid embeddings when a provider is available", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
@@ -973,7 +1043,6 @@ describe("MissionControlSearchService", () => {
       directory,
       {
         query: "meaning unrelated to lexical terms",
-        mode: "semantic",
       },
       provider,
     )
@@ -983,7 +1052,7 @@ describe("MissionControlSearchService", () => {
       throw new Error("Expected semantic search to succeed")
     }
 
-    expect(result.data.effectiveMode).toBe("semantic")
+    expect(result.data.effectiveMode).toBe("hybrid")
     expect(result.data.matches[0]?.sessionId).toBe("session-a")
   })
 
@@ -1357,8 +1426,64 @@ describe("MissionControlSearchService", () => {
     }
 
     expect(second.data.matches[0]?.snippet).toContain("Updated semantic content")
-    expect(second.data.matches[0]?.score).toBe(1)
+    expect(second.data.matches[0]?.score ?? 0).toBeGreaterThan(first.data.matches[0]?.score ?? 0)
     expect(embedCalls).toBe(2)
+  })
+
+  test("falls back to lexical matches when the semantic provider fails", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
+    tempDirs.push(directory)
+
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          return [
+            {
+              id: "provider-fallback",
+              directory,
+              title: "Provider Fallback",
+              time: { created: 1, updated: 10 },
+            },
+          ]
+        },
+        async messages() {
+          return [
+            {
+              info: { id: "message-provider-fallback", role: "assistant", time: { created: 5 } },
+              parts: [{ id: "part-provider-fallback", type: "text", text: "lexical fallback survives provider failure" }],
+            },
+          ]
+        },
+      },
+    })
+
+    const failingProvider: SemanticEmbeddingProvider = {
+      name: "jina",
+      isAvailable: () => true,
+      availabilityWarning: () => undefined,
+      signature: () => "failing-provider-fallback",
+      embedQuery: async () => [1, 0],
+      embedPassages: async () => {
+        throw new Error("provider failed")
+      },
+    }
+
+    const config = createMissionControlConfig({
+      search: {
+        semanticEnabled: true,
+        semanticProvider: "jina",
+      },
+    })
+    const service = new MissionControlSearchService(new MissionControlSourceDB(), new MissionControlRuntimeState(20))
+    const result = await service.search(adapter, config, directory, { query: "lexical fallback" }, failingProvider)
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected provider failure to fall back to lexical")
+    }
+    expect(result.data.effectiveMode).toBe("lexical")
+    expect(result.data.matches).toHaveLength(1)
+    expect(result.data.warnings[0]).toContain("Semantic search failed and fell back to lexical mode")
   })
 
   test("returns an error when semantic search fails and lexical fallback is disabled", async () => {

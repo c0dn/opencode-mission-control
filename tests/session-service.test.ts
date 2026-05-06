@@ -85,6 +85,132 @@ const createPagedMessageClient = (
 }
 
 describe("MissionControlSessionService", () => {
+  test("gets normalized session metadata without reading transcript entries", async () => {
+    let messagesCalled = false
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async get({ path }: { path: { id: string } }) {
+          return {
+            id: path.id,
+            directory: "/tmp/project",
+            parentID: "parent-session",
+            title: "Build notes",
+            status: "idle",
+            time: { created: 10, updated: 20 },
+          }
+        },
+        async messages() {
+          messagesCalled = true
+          return []
+        },
+      },
+    })
+
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const result = await service.getSession(adapter, "ses_123")
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected session metadata lookup to succeed")
+    }
+
+    expect(result.data.session).toEqual({
+      sessionId: "ses_123",
+      title: "Build notes",
+      directory: "/tmp/project",
+      parentSessionId: "parent-session",
+      createdAt: 10,
+      updatedAt: 20,
+      status: "idle",
+    })
+    expect(messagesCalled).toBe(false)
+  })
+
+  test("finds sessions by exact title and flags ambiguity", async () => {
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          return [
+            {
+              id: "ses_1",
+              directory: "/tmp/project",
+              title: "Build notes",
+              time: { created: 1, updated: 2 },
+            },
+            {
+              id: "ses_2",
+              directory: "/tmp/project",
+              title: "Build notes",
+              parentID: "ses_1",
+              time: { created: 3, updated: 4 },
+            },
+            {
+              id: "ses_3",
+              directory: "/tmp/project",
+              title: "build notes",
+              time: { created: 5, updated: 6 },
+            },
+          ]
+        },
+      },
+    })
+
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const result = await service.findSessions(adapter, { title: "Build notes" })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected exact-title session lookup to succeed")
+    }
+
+    expect(result.data).toEqual({
+      title: "Build notes",
+      scope: "local",
+      ambiguous: true,
+      candidates: [
+        {
+          sessionId: "ses_2",
+          title: "Build notes",
+          directory: "/tmp/project",
+          parentSessionId: "ses_1",
+          createdAt: 3,
+          updatedAt: 4,
+          status: undefined,
+        },
+        {
+          sessionId: "ses_1",
+          title: "Build notes",
+          directory: "/tmp/project",
+          parentSessionId: undefined,
+          createdAt: 1,
+          updatedAt: 2,
+          status: undefined,
+        },
+      ],
+    })
+  })
+
+  test("maps global title lookup discovery failures to actionable errors", async () => {
+    const adapter = new OpenCodeAdapter({
+      session: {
+        async list() {
+          throw new Error("global discovery unavailable")
+        },
+      },
+    })
+
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const result = await service.findSessions(adapter, { title: "Build notes", scope: "global" })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error("Expected global discovery failure")
+    }
+
+    expect(result.error.code).toBe("GlobalSessionDiscoveryUnavailable")
+    expect(result.error.suggestion).toContain("scope: 'local'")
+  })
+
   test("reads a session outside the current directory by resolving its actual directory first", async () => {
     const remoteDirectory = "/tmp/remote-project"
     let globalListCalls = 0

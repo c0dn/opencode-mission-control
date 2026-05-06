@@ -19,6 +19,7 @@ import type {
   MissionControlConfig,
   MissionControlRuntimeSecrets,
   MissionControlStatus,
+  SessionFindArgs,
   ToolCallerContext,
 } from "./types.js"
 import { fail } from "./types.js"
@@ -73,7 +74,7 @@ export class MissionControlServer {
     this.runtimeState = new MissionControlRuntimeState(config.observe.eventBufferSize)
     this.sourceDB = new MissionControlSourceDB()
     this.searchService = new MissionControlSearchService(this.sourceDB, this.runtimeState)
-    this.sessionService = new MissionControlSessionService(this.runtimeState)
+    this.sessionService = new MissionControlSessionService(this.runtimeState, this.sourceDB)
     this.jobController = new MissionControlJobController(rootDir, config)
     this.jobLauncher = new MissionControlJobLauncher(() => this.config, this.jobController)
   }
@@ -164,6 +165,8 @@ export class MissionControlServer {
 
     return {
       search: {
+        sessionGet: exposesSessionTools,
+        sessionFind: exposesSessionTools,
         sessionRead: exposesSessionTools,
         sessionTail: exposesSessionTools,
         sessionTree: exposesSessionTools,
@@ -207,6 +210,8 @@ export class MissionControlServer {
       startedAt: this.startedAt,
       directory: rootDir,
       implemented: {
+        sessionGet: this.config.tools.surface !== "jobs-only",
+        sessionFind: this.config.tools.surface !== "jobs-only",
         sessionRead: this.config.tools.surface !== "jobs-only",
         sessionTail: this.config.tools.surface !== "jobs-only",
         sessionTree: this.config.tools.surface !== "jobs-only",
@@ -259,6 +264,16 @@ export class MissionControlServer {
   ) {
     const adapter = this.adapter
     return this.sessionService.readSession(adapter, sessionId, options)
+  }
+
+  async getSession(sessionId: string) {
+    const adapter = this.adapter
+    return this.sessionService.getSession(adapter, sessionId)
+  }
+
+  async findSessions(args: SessionFindArgs) {
+    const adapter = this.adapter
+    return this.sessionService.findSessions(adapter, args)
   }
 
   async tailSession(

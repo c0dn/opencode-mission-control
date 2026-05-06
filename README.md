@@ -15,9 +15,11 @@ Detailed behavior and caveats live under `docs/`.
 - [`runtime_model.md`](docs/runtime_model.md) — cross-cutting runtime behavior, lifecycle rules, persistence, and non-goals
 - [`mc_status()`](docs/mc_status.md) — runtime health, config, counters, and capability probe
 - [`mc_session_read({ sessionId, beforeMessageId?, limit?, withChildren?, withToolOutputs? })`](docs/mc_session_read.md) — read a transcript, optionally including child sessions and raw tool outputs
+- [`mc_session_get({ sessionId })`](docs/mc_session_get.md) — get normalized metadata for one session ID
+- [`mc_session_find({ title, scope?, limit? })`](docs/mc_session_find.md) — find exact-title metadata candidates; titles can be ambiguous
 - [`mc_session_tree({ sessionId, depth? })`](docs/mc_session_tree.md) — inspect a session’s parent/child tree
 - [`mc_session_events({ sessionId, withChildren?, limit? })`](docs/mc_session_events.md) — view recent live events and current status
-- [`mc_session_search({ query, sessionId?, scope?, exact?, limit? })`](docs/mc_session_search.md) — search indexed session content; `scope: "global"` widens discovery and `exact: true` forces lexical matching
+- [`mc_session_search({ query, scope?, exact?, limit? })`](docs/mc_session_search.md) — search indexed session content; `scope: "global"` widens discovery and `exact: true` forces lexical matching
 - [`mc_job_start({ prompt, title? })`](docs/mc_job_start.md) — launch an attached background child-session job for the current session
 - [`mc_job_status({ jobId })`](docs/mc_job_status.md) — inspect one tracked job and its latest stable result if available
 - [`mc_job_events({ jobId, limit? })`](docs/mc_job_events.md) — inspect the persisted event feed for a job, including lifecycle changes and child progress updates
@@ -45,12 +47,21 @@ mc_session_search({
 
 mc_session_search({
   query: "relay failure",
-  sessionId: "ses_123",
   limit: 10,
 })
 ```
 
-Use `mc_session_search` when you want indexed transcript content.
+Use `mc_session_search` when you want indexed transcript content. Search is content-only; use `mc_session_find` for exact title lookup and `mc_session_get` when you already have a session ID.
+
+Semantic/hybrid search is automatic when a Jina semantic provider/API key is configured and available. Otherwise search falls back to SQLite FTS/BM25 lexical retrieval; `exact: true` always uses lexical retrieval.
+
+Exact title lookup can return multiple candidates because titles are not unique:
+
+```text
+mc_session_find({ title: "Search audit", limit: 5 })
+
+mc_session_get({ sessionId: "ses_123" })
+```
 
 Use `mc_session_read` when you need exact transcript boundaries or raw tool outputs:
 
@@ -123,6 +134,8 @@ This plugin does **not** install native OpenCode skills automatically. `opencode
 If you want reusable local skills for your own workspace, the simplest path is to ask OpenCode to generate them from these docs:
 
 - `@docs/mc_session_search.md`
+- `@docs/mc_session_get.md`
+- `@docs/mc_session_find.md`
 - `@docs/mc_job_start.md`
 - `@docs/mc_job_result.md`
 - `@docs/runtime_model.md`
@@ -135,6 +148,7 @@ Create .opencode/skills/mission-control-search/SKILL.md and .opencode/skills/mis
 Use the Mission Control docs as the source of truth.
 Include examples for:
 - searching sessions
+- looking up sessions by ID or exact title
 - starting background jobs
 - how blocked parent replies and progress updates work
 ```

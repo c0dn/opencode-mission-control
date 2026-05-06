@@ -210,6 +210,7 @@ describe("SqliteSearchIndexStore", () => {
         sessionIDs: ["missing"],
       }),
     ).toEqual([])
+    expect(store.queryFtsCandidates({ scope: "current_directory", query: "Local", limit: 5 })).toEqual([])
 
     sqlite.close()
   })

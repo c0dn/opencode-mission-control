@@ -7,7 +7,7 @@ This document covers Mission Control behavior that spans multiple tools. Tool-sp
 Mission Control supports:
 
 - normal OpenCode runtime with the plugin loaded
-- session search and observation using the live runtime plus persisted sidecar data
+- session metadata lookup, content search, and observation using the live runtime plus persisted sidecar data
 - background jobs only while the same OpenCode runtime is active
 - session discovery and indexing within the scope exposed by the active OpenCode client
 
@@ -122,6 +122,8 @@ For long-running work, attached child sessions may also call `mc_job_update({ me
 
 ## Transcript inspection
 
+- `mc_session_get` returns normalized metadata for one session ID; it does not return transcript messages
+- `mc_session_find` returns normalized metadata candidates for exact title lookup; exact titles can be ambiguous, so callers should select from candidates using metadata
 - `mc_session_read` is the exact transcript inspection tool and supports newest-relative paging with `offset` and `limit`
 - `mc_session_tail` is the compact recent-message view and omits tool outputs, reasoning, and step markers
 - limited `mc_session_read` / `mc_session_tail` calls now use raw OpenCode session-message paging when the runtime exposes the raw request client
@@ -151,7 +153,7 @@ Important mappings:
 
 ## Persistence model
 
-Mission Control writes JSON sidecars under:
+Mission Control writes sidecars under:
 
 ```text
 ~/.cache/opencode-mission-control/<scope-hash>/
@@ -159,7 +161,7 @@ Mission Control writes JSON sidecars under:
 
 Current sidecars:
 
-- `search-index.<scope>.json` — normalized searchable chunks, per-session cursors, and optional semantic/query-vector cache
+- `search-index.<scope>.sqlite3` — normalized searchable chunks, SQLite FTS/BM25 lexical data, per-session cursors, and optional semantic/query-vector cache
 - dirty invalidation sidecars — persisted transcript/index invalidations
 - `jobs.json` — background jobs, lifecycle events, and stable result snapshots
 
@@ -170,6 +172,7 @@ Persistence rules:
 - sidecar writes are best-effort and aim to be idempotent where practical
 - some reply/progress mutations can succeed in memory even if the sidecar write fails, so an immediate restart can still lose the newest job-event or blocked-state mutation
 - unchanged sessions are incrementally reused through persisted cursors/checkpoints
+- legacy JSON search-index sidecars may be imported when present, but the active search cache is SQLite-backed
 
 ## Parent relay semantics
 
@@ -219,14 +222,17 @@ The feed includes:
 
 The persisted job-event feed is retained as a recent history window, not an unbounded forever-log.
 
-## Semantic search
+## Session search
 
-Semantic search is optional.
+`mc_session_search` searches indexed transcript content. It does not perform title-only lookup; exact title lookup belongs to `mc_session_find`.
 
-- lexical mode remains the fallback and must still be useful by itself
+- lexical retrieval uses SQLite FTS5/BM25 and remains the fallback
 - `exact=true` forces lexical retrieval
-- hybrid/semantic modes are relevance modes, not exact-match guarantees
-- chunk embeddings and recent query embeddings are cached in the scope-specific search index
+- hybrid retrieval is automatic when a configured Jina semantic provider/API key is available; otherwise search falls back to lexical retrieval
+- hybrid retrieval fuses lexical and semantic ranked candidates with RRF
+- native vector-table support (`vec1` / `sqlite-vec`) is best-effort; blob-scan vector retrieval is the fallback when extension-backed queries are unavailable or fail
+- hybrid/semantic retrieval is a relevance mode, not an exact-match guarantee
+- chunk embeddings and recent query embeddings are cached in the scope-specific SQLite search index
 
 ## Error guidance
 

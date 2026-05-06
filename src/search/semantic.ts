@@ -183,3 +183,34 @@ export function scoreSemantically(
 
   return matches.sort(compareSearchMatches)
 }
+
+export function buildSemanticCandidateMatches(
+  candidates: { chunkID: string; score: number }[],
+  chunksByID: Map<string, SessionChunk>,
+  sessionMap: Map<string, { title: string }>,
+  query: string,
+): SessionSearchMatch[] {
+  return candidates
+    .map((candidate) => {
+      const chunk = chunksByID.get(candidate.chunkID)
+      if (!chunk) {
+        return undefined
+      }
+
+      const match: SessionSearchMatch = {
+        sessionId: chunk.sessionID,
+        messageId: chunk.messageID,
+        partId: chunk.partID,
+        score: candidate.score,
+        matchType: "candidate",
+        title: sessionMap.get(chunk.sessionID)?.title,
+        snippet: createSearchSnippet(chunk.text, query),
+        role: chunk.role,
+        partType: chunk.partType,
+        createdAt: chunk.createdAt,
+      }
+      return match
+    })
+    .filter((match): match is SessionSearchMatch => Boolean(match))
+    .sort(compareSearchMatches)
+}

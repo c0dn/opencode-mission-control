@@ -1,4 +1,4 @@
-import { OpenCodeAdapter, SessionMessagePagingUnsupportedError } from "./opencode-client.js"
+import { GlobalSessionDiscoveryError, OpenCodeAdapter, SessionMessagePagingUnsupportedError } from "./opencode-client.js"
 import { MissionControlRuntimeState } from "./runtime-state.js"
 import {
   extractTailText,
@@ -6,11 +6,17 @@ import {
   hasVisibleTranscriptContent,
   extractParentSessionID,
   extractSessionID,
+  extractSessionTimestamp,
   extractStatus,
   extractTitle,
   normalizeMessage,
 } from "./session-extractors.js"
+import { MissionControlSourceDB, type SourceSessionRecord } from "./source-db.js"
 import type {
+  SessionFindArgs,
+  SessionFindResult,
+  SessionGetResult,
+  SessionMetadata,
   SessionObserveResult,
   SessionReadResult,
   SessionTailEntry,
@@ -22,7 +28,61 @@ import type {
 import { fail, ok } from "./types.js"
 
 export class MissionControlSessionService {
-  constructor(private readonly state: MissionControlRuntimeState) {}
+  constructor(
+    private readonly state: MissionControlRuntimeState,
+    private readonly sourceDB = new MissionControlSourceDB(),
+  ) {}
+
+  async getSession(adapter: OpenCodeAdapter, sessionId: string): Promise<ToolResult<SessionGetResult>> {
+    try {
+      const resolved = await adapter.resolveSession(sessionId)
+      return ok({
+        session: this.normalizeSessionMetadata(sessionId, resolved.session, resolved.directory),
+      })
+    } catch {
+      await adapter.debug("getSession failed to resolve session", { sessionId })
+      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
+    }
+  }
+
+  async findSessions(adapter: OpenCodeAdapter, args: SessionFindArgs): Promise<ToolResult<SessionFindResult>> {
+    const scope = args.scope ?? "local"
+
+    try {
+      const sessions = await this.sourceDB.listSessions(adapter, { global: scope === "global" })
+      const allMatches = this.sourceDB.findSessionsByExactTitle(sessions, args.title)
+      const candidates = this.sourceDB
+        .findSessionsByExactTitle(allMatches, args.title, { limit: args.limit })
+        .map((session) => this.normalizeSourceSessionMetadata(session))
+
+      return ok({
+        title: args.title,
+        scope,
+        candidates,
+        ambiguous: allMatches.length > 1,
+      })
+    } catch (error) {
+      if (error instanceof GlobalSessionDiscoveryError) {
+        return fail(
+          "GlobalSessionDiscoveryUnavailable",
+          "Global session discovery is unavailable from this OpenCode runtime.",
+          "Retry with scope: 'local', or run Mission Control in the directory that owns the target session.",
+        )
+      }
+
+      await adapter.debug("findSessions failed to list sessions", {
+        title: args.title,
+        scope,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
+      return fail(
+        "SessionLookupUnavailable",
+        "Session metadata lookup failed.",
+        "Retry after the runtime settles, or narrow the lookup scope.",
+      )
+    }
+  }
 
   async readSession(
     adapter: OpenCodeAdapter,
@@ -433,6 +493,34 @@ export class MissionControlSessionService {
       recentEvents: this.state.recentEventsForSessions(sessionIDs, rawEventLimit),
       children: childSummaries,
     })
+  }
+
+  private normalizeSessionMetadata(sessionId: string, session: unknown, directory?: string): SessionMetadata {
+    const cachedMetadata = this.state.metadataForSession(sessionId)
+
+    return {
+      sessionId,
+      title: extractTitle(session) ?? cachedMetadata?.title ?? "Untitled session",
+      directory: extractDirectory(session) ?? cachedMetadata?.directory ?? directory,
+      parentSessionId: extractParentSessionID(session) ?? cachedMetadata?.parentSessionId,
+      createdAt: extractSessionTimestamp(session, "created") ?? cachedMetadata?.createdAt,
+      updatedAt: extractSessionTimestamp(session, "updated") ?? cachedMetadata?.updatedAt,
+      status: this.state.statusForSession(sessionId, extractStatus(session)),
+    }
+  }
+
+  private normalizeSourceSessionMetadata(session: SourceSessionRecord): SessionMetadata {
+    const cachedMetadata = this.state.metadataForSession(session.sessionID)
+
+    return {
+      sessionId: session.sessionID,
+      title: session.title,
+      directory: session.directory || cachedMetadata?.directory || undefined,
+      parentSessionId: session.parentSessionID ?? cachedMetadata?.parentSessionId,
+      createdAt: session.createdAt,
+      updatedAt: session.updatedAt,
+      status: this.state.statusForSession(session.sessionID),
+    }
   }
 
   private async buildTree(

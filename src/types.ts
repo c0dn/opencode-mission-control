@@ -37,6 +37,7 @@ export type MissionControlErrorCode =
   | "GlobalSessionDiscoveryUnavailable"
   | "IndexScopeMismatch"
   | "CurrentSessionUnavailable"
+  | "SessionLookupUnavailable"
   | "NotImplemented"
 
 export interface MissionControlConfig {
@@ -263,6 +264,8 @@ export type ToolResult<T> = ToolSuccess<T> | ToolFailure
 
 export interface MissionControlCapabilityMatrix {
   search: {
+    sessionGet: boolean
+    sessionFind: boolean
     sessionRead: boolean
     sessionTail: boolean
     sessionTree: boolean
@@ -337,6 +340,8 @@ export interface MissionControlStatus {
   directory: string
   implemented: {
     sessionRead: boolean
+    sessionGet: boolean
+    sessionFind: boolean
     sessionTail: boolean
     sessionTree: boolean
     sessionObserve: boolean
@@ -371,10 +376,40 @@ export interface SessionTranscriptEntry {
 
 export interface SessionSearchArgs {
   query: string
-  sessionId?: string
   scope?: "local" | "global"
   exact?: boolean
   limit?: number
+}
+
+export interface SessionMetadata {
+  sessionId: string
+  title: string
+  directory?: string
+  parentSessionId?: string
+  createdAt?: number
+  updatedAt?: number
+  status?: string
+}
+
+export interface SessionGetArgs {
+  sessionId: string
+}
+
+export interface SessionGetResult {
+  session: SessionMetadata
+}
+
+export interface SessionFindArgs {
+  title: string
+  scope?: "local" | "global"
+  limit?: number
+}
+
+export interface SessionFindResult {
+  title: string
+  scope: "local" | "global"
+  candidates: SessionMetadata[]
+  ambiguous: boolean
 }
 
 export interface SessionSearchMatch {

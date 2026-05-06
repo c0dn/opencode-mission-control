@@ -91,6 +91,18 @@ describe("resolveMissionControlRuntime", () => {
     expect(secrets.search.jinaApiKey).toBe("test-key")
   })
 
+  test("enables Jina semantic retrieval when only an api key is provided", () => {
+    const { config, secrets } = resolveMissionControlRuntime({
+      search: {
+        jinaApiKey: "test-key",
+      },
+    })
+
+    expect(config.search.semanticEnabled).toBe(true)
+    expect(config.search.semanticProvider).toBe("jina")
+    expect(secrets.search.jinaApiKey).toBe("test-key")
+  })
+
   test("does not allow runtime options to enable unsafe MVP safety flags", () => {
     const { config } = resolveMissionControlRuntime({
       safety: {

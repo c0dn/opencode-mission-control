@@ -6,8 +6,10 @@ import { openMissionControlSqliteDatabase, type MissionControlSqliteDatabase } f
 import { resolveMissionControlSqliteCachePath } from "./storage/sqlite-paths.js"
 import type {
   MissionControlIndexStatus,
+  NativeVectorBackendName,
   SessionDiscoveryScope,
   SessionTranscriptEntry,
+  VectorBackendPreference,
 } from "./types.js"
 import { withPathLock } from "./index-db/locks.js"
 import { buildCursors, chooseLatestCandidate, mergeIndexDocuments } from "./index-db/merge.js"
@@ -22,6 +24,11 @@ import {
 
 export type { SearchIndexDocument, SearchIndexSessionCursor } from "./index-db/types.js"
 
+export interface MissionControlIndexDBOptions {
+  vectorExtensionPaths?: Partial<Record<NativeVectorBackendName, string>>
+  vectorBackend?: VectorBackendPreference
+}
+
 export class MissionControlIndexDB {
   private static readonly VERSION = 5
   private readonly sqliteByPath = new Map<string, MissionControlSqliteDatabase>()
@@ -31,6 +38,7 @@ export class MissionControlIndexDB {
     private readonly rootDir: string,
     private readonly configuredIndexPath?: string,
     private readonly discoveryScope?: SessionDiscoveryScope,
+    private readonly options: MissionControlIndexDBOptions = {},
   ) {}
 
   getIndexPath(scope = this.discoveryScope ?? "current_directory") {
@@ -168,6 +176,29 @@ export class MissionControlIndexDB {
   async save(index: SearchIndexDocument) {
     try {
       return await this.saveInternal(index)
+    } finally {
+      this.close()
+    }
+  }
+
+  async queryFtsCandidates(options: Parameters<SqliteSearchIndexStore["queryFtsCandidates"]>[0]) {
+    try {
+      return this.store(options.scope).queryFtsCandidates(options)
+    } finally {
+      this.close()
+    }
+  }
+
+  async querySemanticCandidates(options: {
+    scope: SessionDiscoveryScope
+    signature: string
+    queryVector: number[]
+    limit?: number
+    sessionIDs?: Iterable<string>
+    vectorBackend?: VectorBackendPreference
+  }) {
+    try {
+      return this.store(options.scope).querySemanticCandidates(options)
     } finally {
       this.close()
     }
@@ -349,8 +380,10 @@ export class MissionControlIndexDB {
       return existing
     }
 
-    const sqlite = openMissionControlSqliteDatabase(path)
-    const store = new SqliteSearchIndexStore({ sqlite })
+    const sqlite = openMissionControlSqliteDatabase(path, {
+      extensions: this.options.vectorExtensionPaths,
+    })
+    const store = new SqliteSearchIndexStore({ sqlite, vectorBackend: this.options.vectorBackend })
     store.ensureSchema()
     this.sqliteByPath.set(path, sqlite)
     this.storeByPath.set(path, store)

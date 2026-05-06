@@ -1,24 +1,18 @@
 import type { SemanticEmbeddingProvider } from "../semantic-provider.js"
 import type { MissionControlConfig, SearchMode } from "../types.js"
 
-import { shouldPreferLexicalQuery } from "./query.js"
-
 export interface SearchModeSelectionArgs {
   mode?: SearchMode
   exact?: boolean
   query: string
 }
 
-export function selectRequestedMode(args: SearchModeSelectionArgs, config: MissionControlConfig): SearchMode {
-  if (args.mode) {
-    return args.mode
-  }
-
-  if (args.exact || shouldPreferLexicalQuery(args.query)) {
+export function selectRequestedMode(args: SearchModeSelectionArgs, _config: MissionControlConfig): SearchMode {
+  if (args.exact) {
     return "lexical"
   }
 
-  return config.search.defaultMode
+  return "hybrid"
 }
 
 export function resolveMode(
@@ -32,7 +26,6 @@ export function resolveMode(
   }
 
   if (!config.search.semanticEnabled) {
-    warnings.push("Semantic search is disabled in configuration; using lexical mode instead.")
     return "lexical"
   }
 

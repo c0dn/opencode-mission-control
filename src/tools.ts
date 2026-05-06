@@ -20,6 +20,34 @@ export const createMissionControlTools = (server: MissionControlServer) => {
     },
   }),
 
+  mc_session_get: tool({
+    description: "Return normalized metadata for one session",
+    args: {
+      sessionId: tool.schema.string(),
+    },
+    async execute(args) {
+      return toPluginToolResult(await server.getSession(args.sessionId))
+    },
+  }),
+
+  mc_session_find: tool({
+    description: "Find sessions by exact title and return metadata candidates",
+    args: {
+      title: tool.schema.string(),
+      scope: tool.schema.enum(["local", "global"]).optional(),
+      limit: tool.schema.number().optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(
+        await server.findSessions({
+          title: args.title,
+          scope: args.scope,
+          limit: clampResultLimit(args.limit, server.config),
+        }),
+      )
+    },
+  }),
+
   mc_session_read: tool({
     description: "Read one session transcript, optionally with children",
     args: {
@@ -94,7 +122,6 @@ export const createMissionControlTools = (server: MissionControlServer) => {
     description: "Search indexed session content by query",
     args: {
       query: tool.schema.string(),
-      sessionId: tool.schema.string().optional(),
       scope: tool.schema.enum(["local", "global"]).optional(),
       exact: tool.schema.boolean().optional(),
       limit: tool.schema.number().optional(),
@@ -103,7 +130,6 @@ export const createMissionControlTools = (server: MissionControlServer) => {
       return toPluginToolResult(
         await server.searchSessions({
           query: args.query,
-          sessionId: args.sessionId,
           scope: args.scope,
           exact: args.exact,
           limit: clampResultLimit(args.limit, server.config),
@@ -351,6 +377,8 @@ const selectToolsForSurface = <T extends Record<string, unknown>>(tools: T, surf
         ])
       : new Set([
           "mc_status",
+          "mc_session_get",
+          "mc_session_find",
           "mc_session_read",
           "mc_session_tail",
           "mc_session_tree",

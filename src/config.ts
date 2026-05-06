@@ -102,13 +102,15 @@ export const resolveMissionControlRuntime = (
   const searchOptions = options.search ?? {}
   const { jinaApiKey, ...publicSearchOptions } = searchOptions
   const resolvedApiKey = normalizeString(jinaApiKey)
+  const semanticEnabled = publicSearchOptions.semanticEnabled ?? Boolean(resolvedApiKey)
 
   const config = createMissionControlConfig({
     search: {
       ...publicSearchOptions,
+      semanticEnabled,
       semanticProvider:
         publicSearchOptions.semanticProvider ??
-        (publicSearchOptions.semanticEnabled ? "jina" : DEFAULT_CONFIG.search.semanticProvider),
+        (semanticEnabled ? "jina" : DEFAULT_CONFIG.search.semanticProvider),
     },
     observe: options.observe,
     tools: options.tools,

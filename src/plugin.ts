@@ -7,6 +7,10 @@ import { createMissionControlTools } from "./tools.js"
 import type { MissionControlPluginOptions } from "./types.js"
 
 const TOOL_GUIDANCE: Record<string, string> = {
+  mc_session_get:
+    "Use this to resolve a known session ID to normalized metadata only. It does not read transcript entries; use mc_session_read or mc_session_tail for content.",
+  mc_session_find:
+    "Use this to find sessions by exact title and inspect metadata candidates. If ambiguous is true, choose a returned sessionId before reading transcript content.",
   mc_session_read:
     "Use this for exact transcript inspection across older session history. Prefer paging with offset/limit instead of reading everything at once. Only set withToolOutputs: true when raw tool output is truly required.",
   mc_session_tail:
@@ -14,7 +18,7 @@ const TOOL_GUIDANCE: Record<string, string> = {
   mc_session_events:
     "Use this for recent live state, not full transcript history. Example: mc_session_events({ sessionId: 'ses_123', withChildren: true, limit: 25 }).",
   mc_session_search:
-    "Use this for indexed search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'ParentSessionScopeUnavailable', scope: 'global', exact: true }); mc_session_search({ query: 'relay failure', sessionId: 'ses_123' }). Prefer mc_session_tail for recent text and mc_session_read only for deep transcript inspection.",
+    "Use this for indexed content search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'ParentSessionScopeUnavailable', scope: 'global', exact: true }). Use mc_session_find for title lookup and mc_session_get when you already have a sessionId. Prefer mc_session_tail for recent text and mc_session_read only for deep transcript inspection.",
   mc_job_start:
     "Starts a background child session attached to the current parent session only. Examples: mc_job_start({ prompt: 'Summarize blockers in this session.' }); mc_job_start({ title: 'Search audit', prompt: 'Find mentions of global scope behavior.' }). Call it from the parent session you want to attach to. Automatic parent notifications depend on the current runtime supporting parent relay.",
   mc_job_status:

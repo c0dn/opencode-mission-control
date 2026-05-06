@@ -21,7 +21,7 @@ export const hasExactLexicalMatch = (haystack: string, query: string) => {
 
 export const scoreLexicalChunk = (
   chunk: SessionChunk,
-  title: string | undefined,
+  _title: string | undefined,
   queryTerms: string[],
   fullQuery: string,
 ): SessionSearchMatch | undefined => {
@@ -31,22 +31,12 @@ export const scoreLexicalChunk = (
   }
 
   const text = chunk.text.toLowerCase()
-  const normalizedTitle = (title ?? "").toLowerCase()
-  const toolName = (chunk.toolName ?? "").toLowerCase()
   const textHasExactQuery = hasExactLexicalMatch(text, query)
-  const isExactMatch = textHasExactQuery || toolName === query
+  const isExactMatch = textHasExactQuery
 
   let score = 0
   if (text.includes(query)) {
     score += 10
-  }
-
-  if (normalizedTitle.includes(query)) {
-    score += 8
-  }
-
-  if (toolName === query) {
-    score += 6
   }
 
   if (isExactMatch) {
@@ -58,13 +48,6 @@ export const scoreLexicalChunk = (
       score += 3
     }
 
-    if (normalizedTitle.includes(term)) {
-      score += 2
-    }
-
-    if (toolName.includes(term)) {
-      score += 2
-    }
   }
 
   if (score <= 0) {
@@ -77,12 +60,46 @@ export const scoreLexicalChunk = (
     partId: chunk.partID,
     score,
     matchType: isExactMatch ? "exact" : "candidate",
-    title,
+    title: _title,
     snippet: createSearchSnippet(chunk.text, fullQuery),
     role: chunk.role,
     partType: chunk.partType,
     createdAt: chunk.createdAt,
   }
+}
+
+export const matchFtsCandidates = (
+  candidates: { chunkID: string; rank: number }[],
+  chunksByID: Map<string, SessionChunk>,
+  sessionTitles: Map<string, string>,
+  fullQuery: string,
+) => {
+  const query = fullQuery.trim().toLowerCase()
+
+  return candidates
+    .map((candidate, index) => {
+      const chunk = chunksByID.get(candidate.chunkID)
+      if (!chunk) {
+        return undefined
+      }
+
+      const isExactMatch = hasExactLexicalMatch(chunk.text.toLowerCase(), query)
+      const match: SessionSearchMatch = {
+        sessionId: chunk.sessionID,
+        messageId: chunk.messageID,
+        partId: chunk.partID,
+        score: (isExactMatch ? 1_000 : 0) + 1 / (index + 1),
+        matchType: isExactMatch ? "exact" : "candidate",
+        title: sessionTitles.get(chunk.sessionID),
+        snippet: createSearchSnippet(chunk.text, fullQuery),
+        role: chunk.role,
+        partType: chunk.partType,
+        createdAt: chunk.createdAt,
+      }
+      return match
+    })
+    .filter((match): match is SessionSearchMatch => Boolean(match))
+    .sort(compareSearchMatches)
 }
 
 export const combineHybridMatches = (

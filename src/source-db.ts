@@ -110,4 +110,18 @@ export class MissionControlSourceDB {
 
     return allowed
   }
+
+  findSessionsByExactTitle(
+    sessions: SourceSessionRecord[],
+    title: string,
+    options: {
+      limit?: number
+    } = {},
+  ): SourceSessionRecord[] {
+    const limit = Math.max(1, Math.trunc(options.limit ?? (sessions.length || 1)))
+    return sessions
+      .filter((session) => session.title === title)
+      .sort((left, right) => right.updatedAt - left.updatedAt || right.createdAt - left.createdAt || left.sessionID.localeCompare(right.sessionID))
+      .slice(0, limit)
+  }
 }
