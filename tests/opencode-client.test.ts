@@ -224,6 +224,175 @@ describe("OpenCodeAdapter pending input APIs", () => {
     ])
   })
 
+  test("lists local sessions through the injected raw client with directory scope", async () => {
+    const calls: Array<{ method: string; options: unknown }> = []
+    const adapter = new OpenCodeAdapter({
+      _client: {
+        async get(options: unknown) {
+          calls.push({ method: "get", options })
+          return { data: [{ id: "raw-local" }], response: new Response("[]") }
+        },
+      },
+      session: {
+        async list() {
+          throw new Error("native session.list should not be used when raw client is available")
+        },
+      },
+    })
+
+    expect(await adapter.listSessions({ directory: "/tmp/project" })).toEqual([{ id: "raw-local" }])
+    expect(calls).toEqual([
+      {
+        method: "get",
+        options: { url: "/session", query: { directory: "/tmp/project" }, throwOnError: true },
+      },
+    ])
+  })
+
+  test("lists global sessions through the injected raw experimental endpoint", async () => {
+    const calls: Array<{ method: string; options: unknown }> = []
+    const adapter = new OpenCodeAdapter(
+      {
+        _client: {
+          async request(options: unknown) {
+            calls.push({ method: "request", options })
+            return { data: [{ id: "raw-global" }], response: new Response("[]") }
+          },
+        },
+        session: {},
+      },
+      {
+        sdkClient: {
+          experimental: {
+            session: {
+              async list() {
+                throw new Error("public experimental.session.list should not be used when raw client is available")
+              },
+            },
+          },
+          session: {},
+        },
+      },
+    )
+
+    expect(await adapter.listSessions({ global: true, directory: "/tmp/project" })).toEqual([{ id: "raw-global" }])
+    expect(calls).toEqual([
+      {
+        method: "request",
+        options: { method: "GET", url: "/experimental/session", throwOnError: true },
+      },
+    ])
+  })
+
+  test("reads session details, children, and messages through the injected raw client", async () => {
+    const calls: Array<{ method: string; options: { url?: string; query?: unknown } }> = []
+    const adapter = new OpenCodeAdapter({
+      _client: {
+        async get(options: { url?: string; query?: unknown }) {
+          calls.push({ method: "get", options })
+          if (options.url === "/session/raw-session") {
+            return { data: { id: "raw-session" }, response: new Response("{}") }
+          }
+          if (options.url === "/session/raw-session/children") {
+            return { data: [{ id: "child-session" }], response: new Response("[]") }
+          }
+          if (options.url === "/session/raw-session/message") {
+            return { data: [{ info: { id: "msg-1" }, parts: [] }], response: new Response("[]") }
+          }
+          throw new Error(`Unexpected raw url ${options.url}`)
+        },
+      },
+      session: {},
+    })
+
+    expect(await adapter.getSession("raw-session", "/tmp/project")).toEqual({ id: "raw-session" })
+    expect(await adapter.getSessionChildren("raw-session", "/tmp/project")).toEqual([{ id: "child-session" }])
+    expect(await adapter.getSessionMessages("raw-session", "/tmp/project")).toEqual([{ info: { id: "msg-1" }, parts: [] }])
+    expect(calls).toEqual([
+      { method: "get", options: { url: "/session/raw-session", query: { directory: "/tmp/project" }, throwOnError: true } },
+      {
+        method: "get",
+        options: { url: "/session/raw-session/children", query: { directory: "/tmp/project" }, throwOnError: true },
+      },
+      {
+        method: "get",
+        options: { url: "/session/raw-session/message", query: { directory: "/tmp/project" }, throwOnError: true },
+      },
+    ])
+  })
+
+  test("preserves raw session message paging cursor from response headers", async () => {
+    const calls: Array<{ method: string; options: unknown }> = []
+    const adapter = new OpenCodeAdapter({
+      _client: {
+        async get(options: unknown) {
+          calls.push({ method: "get", options })
+          return {
+            data: [{ info: { id: "msg-1" }, parts: [] }],
+            response: new Response("[]", { headers: { "x-next-cursor": "cursor-2" } }),
+          }
+        },
+      },
+      session: {},
+    })
+
+    expect(
+      await adapter.getSessionMessagePage("raw-session", {
+        directory: "/tmp/project",
+        limit: 1,
+        before: "cursor-1",
+      }),
+    ).toEqual({
+      messages: [{ info: { id: "msg-1" }, parts: [] }],
+      nextCursor: "cursor-2",
+    })
+    expect(calls).toEqual([
+      {
+        method: "get",
+        options: {
+          url: "/session/raw-session/message",
+          query: { directory: "/tmp/project", limit: 1, before: "cursor-1" },
+          responseStyle: "fields",
+          throwOnError: true,
+        },
+      },
+    ])
+  })
+
+  test("prefers raw session listing over a stale serverUrl and public sdk client", async () => {
+    const calls: Array<{ method: string; options: unknown }> = []
+    const adapter = new OpenCodeAdapter(
+      {
+        _client: {
+          getConfig: () => ({ baseUrl: "http://127.0.0.1:1" }),
+          async get(options: unknown) {
+            calls.push({ method: "get", options })
+            return { data: [{ id: "raw-preferred" }], response: new Response("[]") }
+          },
+        },
+        session: {},
+      },
+      {
+        serverUrl: new URL("http://127.0.0.1:1"),
+        sdkClient: {
+          session: {
+            async list() {
+              throw new Error("public session.list should not be used when raw client is available")
+            },
+          },
+        },
+      },
+    )
+
+    expect(await adapter.listSessions({ directory: "/tmp/project" })).toEqual([{ id: "raw-preferred" }])
+    expect(calls).toEqual([
+      {
+        method: "get",
+        options: { url: "/session", query: { directory: "/tmp/project" }, throwOnError: true },
+      },
+    ])
+  })
+
   test("constructs a real v2 sdk client from serverUrl and uses public HTTP endpoints", async () => {
     const requests: Array<{ method: string; pathname: string; search: string }> = []
     const server = createServer(async (req, res) => {
@@ -307,6 +476,127 @@ describe("OpenCodeAdapter pending input APIs", () => {
       })
       expect(requests[1]?.search).toContain("limit=2")
       expect(requests[1]?.search).toContain("directory=%2Ftmp%2Fproject")
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()))
+      })
+    }
+  })
+
+  test("recovers serverUrl from the hidden internal client baseUrl config", async () => {
+    const requests: Array<{ method: string; pathname: string; search: string }> = []
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1")
+      requests.push({
+        method: req.method ?? "GET",
+        pathname: url.pathname,
+        search: url.search,
+      })
+
+      if (url.pathname === "/permission") {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify([{ id: "perm-hidden" }]))
+        return
+      }
+
+      res.writeHead(404, { "content-type": "application/json" })
+      res.end(JSON.stringify({ message: `Unexpected path: ${url.pathname}` }))
+    })
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => resolve())
+    })
+
+    try {
+      const address = server.address()
+      if (!address || typeof address === "string") {
+        throw new Error("Expected an ephemeral TCP server address")
+      }
+
+      const adapter = new OpenCodeAdapter(
+        {
+          _client: {
+            getConfig: () => ({
+              baseUrl: `http://127.0.0.1:${address.port}`,
+            }),
+          },
+          session: {},
+        },
+        {
+          directory: "/tmp/project",
+        },
+      )
+
+      expect(await adapter.listPendingPermissions()).toEqual([{ id: "perm-hidden" }])
+      expect(requests).toEqual([
+        {
+          method: "GET",
+          pathname: "/permission",
+          search: "?directory=%2Ftmp%2Fproject",
+        },
+      ])
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()))
+      })
+    }
+  })
+
+  test("prefers hidden internal client baseUrl over a stale context serverUrl", async () => {
+    const requests: Array<{ method: string; pathname: string; search: string }> = []
+    const server = createServer(async (req, res) => {
+      const url = new URL(req.url ?? "/", "http://127.0.0.1")
+      requests.push({
+        method: req.method ?? "GET",
+        pathname: url.pathname,
+        search: url.search,
+      })
+
+      if (url.pathname === "/permission") {
+        res.writeHead(200, { "content-type": "application/json" })
+        res.end(JSON.stringify([{ id: "perm-preferred" }]))
+        return
+      }
+
+      res.writeHead(404, { "content-type": "application/json" })
+      res.end(JSON.stringify({ message: `Unexpected path: ${url.pathname}` }))
+    })
+
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject)
+      server.listen(0, "127.0.0.1", () => resolve())
+    })
+
+    try {
+      const address = server.address()
+      if (!address || typeof address === "string") {
+        throw new Error("Expected an ephemeral TCP server address")
+      }
+
+      const adapter = new OpenCodeAdapter(
+        {
+          _client: {
+            getConfig: () => ({
+              baseUrl: `http://127.0.0.1:${address.port}`,
+            }),
+          },
+          session: {},
+        },
+        {
+          serverUrl: new URL("http://127.0.0.1:1"),
+          directory: "/tmp/project",
+        },
+      )
+
+      expect(await adapter.listPendingPermissions()).toEqual([{ id: "perm-preferred" }])
+      expect(requests).toEqual([
+        {
+          method: "GET",
+          pathname: "/permission",
+          search: "?directory=%2Ftmp%2Fproject",
+        },
+      ])
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()))

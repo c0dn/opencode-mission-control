@@ -1,6 +1,7 @@
 import { createOpencodeClient as createV2OpencodeClient } from "@opencode-ai/sdk/v2"
 
 import { DebugLogWriter, type OpenCodeAdapterOptions } from "./opencode/debug-log.js"
+import { directoryQuery, getRawClient, rawRequest, unwrap, withDirectoryQuery } from "./opencode/raw-client.js"
 import {
   GlobalSessionDiscoveryError,
   findSessionOwningMessage,
@@ -35,11 +36,13 @@ export class OpenCodeAdapter {
     private readonly options: OpenCodeAdapterOptions = {},
   ) {
     this.debugLogWriter = new DebugLogWriter(client, options)
+    const resolvedServerUrl =
+      recoverServerUrlFromInternalClient(client) ?? options.serverUrl ?? recoverServerUrlFromInternalClient(options.sdkClient)
     this.publicClient =
       options.sdkClient ??
-      (options.serverUrl
+      (resolvedServerUrl
         ? createV2OpencodeClient({
-            baseUrl: typeof options.serverUrl === "string" ? options.serverUrl : options.serverUrl.toString(),
+            baseUrl: typeof resolvedServerUrl === "string" ? resolvedServerUrl : resolvedServerUrl.toString(),
           })
         : undefined)
   }
@@ -78,7 +81,7 @@ export class OpenCodeAdapter {
   }
 
   supportsSessionMessagePaging() {
-    return Boolean(this.publicClient?.session?.messages)
+    return Boolean(getRawClient(this.client) || this.publicClient?.session?.messages)
   }
 
   supportsParentReplies() {
@@ -119,6 +122,14 @@ export class OpenCodeAdapter {
   async getSession(sessionID: string, directory?: string) {
     const resolvedDirectory = this.resolveDirectory(directory)
 
+    if (getRawClient(this.client)) {
+      return rawRequest(this.client, {
+        path: `/session/${encodeURIComponent(sessionID)}`,
+        query: directoryQuery(resolvedDirectory),
+        throwOnError: true,
+      })
+    }
+
     if (this.publicClient?.session?.get) {
       return unwrap(
         await this.publicClient.session.get(this.scopedParams({ sessionID }, resolvedDirectory), {
@@ -133,6 +144,21 @@ export class OpenCodeAdapter {
 
   async listSessions(options: { global?: boolean; directory?: string } = {}) {
     try {
+      if (getRawClient(this.client)) {
+        if (options.global) {
+          return (await rawRequest(this.client, {
+            path: "/experimental/session",
+            throwOnError: true,
+          })) as any[]
+        }
+
+        return (await rawRequest(this.client, {
+          path: "/session",
+          query: directoryQuery(this.resolveDirectory(options.directory)),
+          throwOnError: true,
+        })) as any[]
+      }
+
       if (this.publicClient?.session?.list) {
         if (options.global) {
           return unwrap(
@@ -175,6 +201,14 @@ export class OpenCodeAdapter {
   async getSessionChildren(sessionID: string, directory?: string) {
     const resolvedDirectory = this.resolveDirectory(directory)
 
+    if (getRawClient(this.client)) {
+      return (await rawRequest(this.client, {
+        path: `/session/${encodeURIComponent(sessionID)}/children`,
+        query: directoryQuery(resolvedDirectory),
+        throwOnError: true,
+      })) as any[]
+    }
+
     if (this.publicClient?.session?.children) {
       return unwrap(
         await this.publicClient.session.children(this.scopedParams({ sessionID }, resolvedDirectory), {
@@ -189,6 +223,14 @@ export class OpenCodeAdapter {
 
   async getSessionMessages(sessionID: string, directory?: string) {
     const resolvedDirectory = this.resolveDirectory(directory)
+
+    if (getRawClient(this.client)) {
+      return (await rawRequest(this.client, {
+        path: `/session/${encodeURIComponent(sessionID)}/message`,
+        query: directoryQuery(resolvedDirectory),
+        throwOnError: true,
+      })) as any[]
+    }
 
     if (this.publicClient?.session?.messages) {
       return unwrap(
@@ -210,6 +252,30 @@ export class OpenCodeAdapter {
       before?: string
     },
   ): Promise<SessionMessagePage> {
+    if (getRawClient(this.client)) {
+      const response = await rawRequest<{ data?: any[]; response?: Response }>(this.client, {
+        path: `/session/${encodeURIComponent(sessionID)}/message`,
+        query: {
+          ...(directoryQuery(this.resolveDirectory(options.directory)) ?? {}),
+          limit: options.limit,
+          ...(typeof options.before === "string" ? { before: options.before } : {}),
+        },
+        responseStyle: "fields",
+        throwOnError: true,
+      })
+      const messages = unwrap(response.data ?? []) as any[]
+      const nextCursor = response.response ? extractSessionMessagePagingCursor(response.response.headers) : undefined
+
+      if (messages.length >= options.limit && !nextCursor) {
+        throw new SessionMessagePagingUnsupportedError()
+      }
+
+      return {
+        messages,
+        nextCursor,
+      }
+    }
+
     if (!this.publicClient?.session?.messages) {
       throw new Error("OpenCode client does not expose public session message paging")
     }
@@ -630,35 +696,32 @@ const extractSessionMessagePagingCursor = (headers: Headers) => {
   return undefined
 }
 
-const unwrap = <T>(value: T | { data: T }): T => {
-  if (value && typeof value === "object" && "data" in value) {
-    return (value as { data: T }).data
-  }
-
-  return value as T
-}
-
-const withDirectoryQuery = <T extends Record<string, unknown> & { query?: Record<string, unknown> }>(
-  input: T,
-  directory?: string,
-): T => {
-  if (typeof directory !== "string") {
-    return input
-  }
-
-  return {
-    ...input,
-    query: {
-      ...(input.query ?? {}),
-      directory,
-    },
-  }
-}
-
 const isNoReplyParseError = (error: unknown) => {
   if (!(error instanceof Error)) {
     return false
   }
 
   return error.message.includes("Unexpected EOF") || error.message.includes("Unexpected end of JSON input")
+}
+
+const recoverServerUrlFromInternalClient = (client: unknown): URL | undefined => {
+  if (!client || typeof client !== "object") {
+    return undefined
+  }
+
+  const rawClient = (client as { _client?: { getConfig?: () => { baseUrl?: unknown } } })._client
+  const baseUrl = rawClient?.getConfig?.().baseUrl
+  if (baseUrl instanceof URL) {
+    return baseUrl
+  }
+
+  if (typeof baseUrl !== "string") {
+    return undefined
+  }
+
+  try {
+    return new URL(baseUrl)
+  } catch {
+    return undefined
+  }
 }
