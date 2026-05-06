@@ -3,6 +3,7 @@ import type {
   MissionControlConfig,
   MissionControlPluginOptions,
   MissionControlRuntimeSecrets,
+  VectorBackendPreference,
 } from "./types.js"
 
 export const DEFAULT_CONFIG: MissionControlConfig = {
@@ -15,6 +16,8 @@ export const DEFAULT_CONFIG: MissionControlConfig = {
     semanticNormalized: true,
     semanticEndpoint: "https://api.jina.ai/v1/embeddings",
     semanticRequestTimeoutMs: 30000,
+    vectorBackend: "auto",
+    vectorSearchLimit: 200,
     defaultMode: "lexical",
     defaultResultLimit: 10,
     maxResultLimit: 50,
@@ -49,6 +52,7 @@ export const createMissionControlConfig = (
     search: {
       ...DEFAULT_CONFIG.search,
       ...overrides.search,
+      vectorBackend: normalizeVectorBackendPreference(overrides.search?.vectorBackend),
     },
     observe: {
       ...DEFAULT_CONFIG.observe,
@@ -127,3 +131,10 @@ const normalizeString = (value: string | undefined) => {
   const trimmed = value?.trim()
   return trimmed ? trimmed : undefined
 }
+
+const VECTOR_BACKEND_PREFERENCES = new Set<VectorBackendPreference>(["auto", "vec1", "sqlite-vec", "blob-scan"])
+
+const normalizeVectorBackendPreference = (value: unknown): VectorBackendPreference =>
+  typeof value === "string" && VECTOR_BACKEND_PREFERENCES.has(value as VectorBackendPreference)
+    ? (value as VectorBackendPreference)
+    : DEFAULT_CONFIG.search.vectorBackend

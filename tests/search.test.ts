@@ -1,15 +1,18 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, rm } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 import { afterEach, describe, expect, test } from "bun:test"
 
 import { DEFAULT_CONFIG, createMissionControlConfig } from "../src/config.ts"
+import { SqliteSearchIndexStore } from "../src/index-db/sqlite-store.ts"
+import type { SearchIndexDocument } from "../src/index-db/types.ts"
 import { OpenCodeAdapter } from "../src/opencode-client.ts"
 import { MissionControlRuntimeState } from "../src/runtime-state.ts"
 import type { SemanticEmbeddingProvider } from "../src/semantic-provider.ts"
 import { MissionControlSearchService } from "../src/search.ts"
 import { MissionControlSourceDB } from "../src/source-db.ts"
+import { openMissionControlSqliteDatabase } from "../src/storage/sqlite.ts"
 
 const tempDirs: string[] = []
 
@@ -406,13 +409,7 @@ describe("MissionControlSearchService", () => {
     expect(messageCalls.get("session-a")).toBe(2)
     expect(messageCalls.get("session-b")).toBe(1)
 
-    const persistedIndex = JSON.parse(await readFile(second.data.indexPath, "utf8")) as {
-      cursors?: Array<{
-        sessionID: string
-        sessionUpdatedAt: number
-        indexedAt: number
-      }>
-    }
+    const persistedIndex = loadPersistedIndex(second.data.indexPath, "current_directory")
 
     expect(persistedIndex.cursors?.map((cursor) => cursor.sessionID).sort()).toEqual(["session-a", "session-b"])
     expect(persistedIndex.cursors?.find((cursor) => cursor.sessionID === "session-a")?.sessionUpdatedAt).toBe(11)
@@ -1193,12 +1190,7 @@ describe("MissionControlSearchService", () => {
       throw new Error("Expected deletion prune search to succeed")
     }
 
-    const persistedIndex = JSON.parse(await readFile(second.data.indexPath, "utf8")) as {
-      semantic?: {
-        vectors: Record<string, number[]>
-        fingerprints: Record<string, string>
-      }
-    }
+    const persistedIndex = loadPersistedIndex(second.data.indexPath, "current_directory")
 
     expect(Object.keys(persistedIndex.semantic?.vectors ?? {})).toEqual(["session-keep-part"])
     expect(Object.keys(persistedIndex.semantic?.fingerprints ?? {})).toEqual(["session-keep-part"])
@@ -1289,11 +1281,7 @@ describe("MissionControlSearchService", () => {
     }
     expect(queryCalls).toBe(129)
 
-    const persistedIndex = JSON.parse(await readFile(finalHot.data.indexPath, "utf8")) as {
-      semantic?: {
-        queries?: Record<string, unknown>
-      }
-    }
+    const persistedIndex = loadPersistedIndex(finalHot.data.indexPath, "current_directory")
     expect(Object.keys(persistedIndex.semantic?.queries ?? {})).toHaveLength(128)
   })
 
@@ -1575,7 +1563,7 @@ describe("MissionControlSearchService", () => {
     if (!localResult.ok) {
       throw new Error("Expected local custom-path search to succeed")
     }
-    expect(localResult.data.indexPath).toBe(configuredIndexPath)
+    expect(localResult.data.indexPath).toBe(join(directory, "custom-index.sqlite3"))
 
     const globalResult = await service.search(adapter, config, directory, {
       query: "global-session content",
@@ -1585,7 +1573,7 @@ describe("MissionControlSearchService", () => {
     if (!globalResult.ok) {
       throw new Error("Expected global custom-path search to succeed")
     }
-    expect(globalResult.data.indexPath).toBe(join(directory, "custom-index.global_unscoped.json"))
+    expect(globalResult.data.indexPath).toBe(join(directory, "custom-index.global_unscoped.sqlite3"))
   })
 
   test("reuses an already-scoped custom indexPath without double-appending the scope suffix", async () => {
@@ -1646,7 +1634,7 @@ describe("MissionControlSearchService", () => {
     if (!localResult.ok) {
       throw new Error("Expected local scoped custom-path search to succeed")
     }
-    expect(localResult.data.indexPath).toBe(configuredIndexPath)
+    expect(localResult.data.indexPath).toBe(join(directory, "custom-index.current_directory.sqlite3"))
 
     const globalResult = await service.search(adapter, config, directory, {
       query: "global-session content",
@@ -1656,6 +1644,15 @@ describe("MissionControlSearchService", () => {
     if (!globalResult.ok) {
       throw new Error("Expected global scoped custom-path search to succeed")
     }
-    expect(globalResult.data.indexPath).toBe(join(directory, "custom-index.global_unscoped.json"))
+    expect(globalResult.data.indexPath).toBe(join(directory, "custom-index.global_unscoped.sqlite3"))
   })
 })
+
+const loadPersistedIndex = (indexPath: string, scope: SearchIndexDocument["discovery"]["scope"]) => {
+  const sqlite = openMissionControlSqliteDatabase(indexPath)
+  try {
+    return new SqliteSearchIndexStore({ sqlite }).loadScopedSnapshot(scope) ?? ({ cursors: [], semantic: undefined } as Partial<SearchIndexDocument>)
+  } finally {
+    sqlite.close()
+  }
+}

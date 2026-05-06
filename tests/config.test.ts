@@ -48,6 +48,23 @@ describe("createMissionControlConfig", () => {
     })
   })
 
+  test("defaults vector backend selection to automatic fallback-friendly settings", () => {
+    const config = createMissionControlConfig()
+
+    expect(config.search.vectorBackend).toBe("auto")
+    expect(config.search.vectorSearchLimit).toBe(200)
+    expect(config.search.vectorExtensionPaths).toBeUndefined()
+  })
+
+  test("normalizes invalid vector backend config to auto", () => {
+    const config = createMissionControlConfig({
+      search: {
+        vectorBackend: "not-a-backend" as never,
+      },
+    })
+
+    expect(config.search.vectorBackend).toBe("auto")
+  })
 })
 
 describe("clampResultLimit", () => {

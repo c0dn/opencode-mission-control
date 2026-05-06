@@ -2,3 +2,5 @@ node_modules/
 dist/
 .opencode-mission-control/
 .cache/
+AGENTS.md
+opencode.json

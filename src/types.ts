@@ -1,6 +1,9 @@
 export type SearchMode = "lexical" | "semantic" | "hybrid"
 export type SemanticProviderName = "disabled" | "jina"
 export type SessionDiscoveryScope = "current_directory" | "global_unscoped"
+export type VectorBackendName = "vec1" | "sqlite-vec" | "blob-scan"
+export type VectorBackendPreference = "auto" | VectorBackendName
+export type NativeVectorBackendName = Exclude<VectorBackendName, "blob-scan">
 
 export type ParentResolutionMode =
   | "current_session"
@@ -47,6 +50,9 @@ export interface MissionControlConfig {
     semanticNormalized: boolean
     semanticEndpoint: string
     semanticRequestTimeoutMs: number
+    vectorBackend: VectorBackendPreference
+    vectorExtensionPaths?: Partial<Record<NativeVectorBackendName, string>>
+    vectorSearchLimit: number
     defaultMode: SearchMode
     indexPath?: string
     defaultResultLimit: number
