@@ -5,7 +5,7 @@
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
-  "description": "OpenCode plugin for session intelligence and attached background agents",
+  "description": "OpenCode plugin for session intelligence, transcript inspection, and indexed search",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

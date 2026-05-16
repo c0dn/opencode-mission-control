@@ -5,33 +5,10 @@ export type VectorBackendName = "vec1" | "sqlite-vec" | "blob-scan"
 export type VectorBackendPreference = "auto" | VectorBackendName
 export type NativeVectorBackendName = Exclude<VectorBackendName, "blob-scan">
 
-export type ParentResolutionMode =
-  | "current_session"
-  | "message_owner_session"
-
-export type PermissionReplyMode = "once" | "always" | "reject"
-export type PendingInputKind = "permission" | "question"
-export type MissionControlToolSurface = "full" | "jobs-only" | "inspect-only"
-
-export type JobState =
-  | "queued"
-  | "launching"
-  | "running"
-  | "waiting_permission"
-  | "waiting_question"
-  | "idle"
-  | "completed"
-  | "failed"
-  | "aborted"
-  | "orphaned"
+export type MissionControlToolSurface = "full" | "inspect-only"
 
 export type MissionControlErrorCode =
-  | "ParentSessionNotFound"
-  | "ParentSessionScopeUnavailable"
-  | "JobNotFound"
-  | "JobLaunchFailed"
-  | "JobBlockedOnPermission"
-  | "JobBlockedOnQuestion"
+  | "SessionNotFound"
   | "SearchIndexUnavailable"
   | "SemanticSearchDisabled"
   | "GlobalSessionDiscoveryUnavailable"
@@ -67,16 +44,6 @@ export interface MissionControlConfig {
   tools: {
     surface: MissionControlToolSurface
   }
-  jobs: {
-    enabled: boolean
-    maxConcurrent: number
-    titlePrefix: string
-    keepChildSessionOnCompletion: boolean
-  }
-  safety: {
-    autoApprovePermissions: false
-    autoAnswerQuestions: false
-  }
   debug: {
     enabled: boolean
     filePath?: string
@@ -95,153 +62,6 @@ export interface SessionChunk {
   toolName?: string
   text: string
   createdAt: number
-}
-
-export interface BackgroundJob {
-  jobID: string
-  parentSessionID: string
-  parentDirectory?: string
-  childSessionID?: string
-  childDirectory?: string
-  title: string
-  prompt: string
-  state: JobState
-  createdAt: number
-  updatedAt: number
-  launchedAt?: number
-  completedAt?: number
-  failureReason?: string
-  lastObservedEvent?: string
-  lastSourceUpdatedAt?: number
-  relayState: "pending" | "delivered" | "failed"
-  pendingInput?: JobPendingInput
-  lastResolvedPendingKind?: PendingInputKind
-  lastResolvedPendingRequestID?: string
-}
-
-export interface JobResultSnapshot {
-  jobID: string
-  childSessionID: string
-  state: "idle" | "completed" | "failed" | "aborted"
-  headline: string
-  summary: string
-  blockers: string[]
-  recommendedNextStep?: string
-  keyMessageIDs: string[]
-  observedAt: number
-}
-
-export interface JobLifecycleEvent {
-  eventID: string
-  jobID: string
-  parentSessionID: string
-  childSessionID?: string
-  type: string
-  state: JobState
-  previousState?: JobState
-  at: number
-  detail?: string
-  metadata?: Record<string, unknown>
-}
-
-export interface PendingInputToolReference {
-  messageId: string
-  callId: string
-}
-
-export interface JobPendingPermissionRequest {
-  kind: "permission"
-  requestId: string
-  sessionId: string
-  permission: string
-  patterns: string[]
-  always: string[]
-  metadata: Record<string, unknown>
-  tool?: PendingInputToolReference
-  askedAt: number
-}
-
-export interface JobPendingQuestionOption {
-  label: string
-  description: string
-}
-
-export interface JobPendingQuestionInfo {
-  header: string
-  question: string
-  options: JobPendingQuestionOption[]
-  multiple?: boolean
-  custom?: boolean
-}
-
-export interface JobPendingQuestionRequest {
-  kind: "question"
-  requestId: string
-  sessionId: string
-  questions: JobPendingQuestionInfo[]
-  tool?: PendingInputToolReference
-  askedAt: number
-}
-
-export type JobPendingInput = JobPendingPermissionRequest | JobPendingQuestionRequest
-
-export interface ParentRelayPayload {
-  jobID: string
-  childSessionID: string
-  title: string
-  state: "idle" | "completed" | "failed" | "aborted"
-  summary: string
-  blockers: string[]
-  recommendedNextStep?: string
-}
-
-export interface JobStatusResult {
-  job: MissionControlJob
-}
-
-export interface JobEventsResult {
-  jobId: string
-  events: MissionControlJobEvent[]
-}
-
-export interface JobStartArgs {
-  prompt: string
-  title?: string
-}
-
-export interface JobEventsArgs {
-  jobId: string
-  limit?: number
-}
-
-export interface JobProgressUpdateArgs {
-  jobId?: string
-  message: string
-  notifyParent?: boolean
-}
-
-export interface JobPermissionReplyArgs {
-  jobId: string
-  reply: PermissionReplyMode
-  message?: string
-}
-
-export interface JobQuestionReplyArgs {
-  jobId: string
-  answers: string[][]
-}
-
-export interface JobStartResult {
-  jobId: string
-  sessionId: string
-  childSessionId: string
-  state: "launching" | "running"
-}
-
-export interface JobListArgs {
-  sessionId?: string
-  state?: JobState
-  limit?: number
 }
 
 export interface MissionControlErrorShape {
@@ -276,20 +96,6 @@ export interface MissionControlCapabilityMatrix {
     liveEvents: boolean
     recentBuffer: boolean
   }
-  jobs: {
-    childSessionLaunch: boolean
-    asyncPrompt: boolean
-    resultRelay: boolean
-    blockedInputRelay: boolean
-    abort: boolean
-    permissionReply: boolean
-    questionReply: boolean
-    questionReject: boolean
-    pendingInputDetails: boolean
-    parentReplies: boolean
-    eventFeed: boolean
-    progressUpdates: boolean
-  }
 }
 
 export interface MissionControlEventRecord {
@@ -307,20 +113,6 @@ export interface RuntimeSessionMetadata {
   createdAt?: number
   updatedAt?: number
   observedAt: number
-}
-
-export interface ToolCallerContext {
-  sessionId?: string
-  messageId?: string
-  directory?: string
-  worktree?: string
-}
-
-export interface ParentSessionResolution {
-  mode: ParentResolutionMode
-  sessionId: string
-  directory?: string
-  confidence: "explicit" | "high" | "best_effort"
 }
 
 export interface MissionControlIndexStatus {
@@ -343,11 +135,9 @@ export interface MissionControlStatus {
     sessionGet: boolean
     sessionFind: boolean
     sessionTail: boolean
-    sessionTree: boolean
-    sessionObserve: boolean
-    sessionSearch: boolean
-    jobPendingInput: boolean
-    jobStart: boolean
+      sessionTree: boolean
+      sessionObserve: boolean
+      sessionSearch: boolean
   }
   config: MissionControlConfig
   counters: {
@@ -444,8 +234,6 @@ export interface MissionControlPluginOptions {
   }
   observe?: Partial<MissionControlConfig["observe"]>
   tools?: Partial<MissionControlConfig["tools"]>
-  jobs?: Partial<MissionControlConfig["jobs"]>
-  safety?: Partial<MissionControlConfig["safety"]>
   debug?: Partial<MissionControlConfig["debug"]>
 }
 
@@ -503,71 +291,6 @@ export interface SessionObserveResult {
     status?: string
     title?: string
   }>
-}
-
-export interface MissionControlJob {
-  jobId: string
-  title: string
-  state: JobState
-  childSessionId?: string
-  pendingKind?: PendingInputKind
-  failureReason?: string
-  hasResult: boolean
-}
-
-export interface MissionControlJobEvent {
-  at: number
-  type: string
-  state: JobState
-  detail?: string
-  requestId?: string
-}
-
-export interface MissionControlJobResult {
-  jobId: string
-  childSessionId: string
-  state: "idle" | "completed" | "failed" | "aborted"
-  headline: string
-  summary: string
-  blockers: string[]
-  recommendedNextStep?: string
-}
-
-export interface MissionControlPendingPermissionInput {
-  kind: "permission"
-  requestId: string
-  permission: string
-  patterns: string[]
-  always: string[]
-  reason?: string
-}
-
-export interface MissionControlPendingQuestionInput {
-  kind: "question"
-  requestId: string
-  questions: JobPendingQuestionInfo[]
-}
-
-export type MissionControlPendingInput =
-  | MissionControlPendingPermissionInput
-  | MissionControlPendingQuestionInput
-
-export interface JobPendingInputResult {
-  jobId: string
-  state: JobState
-  pendingInput: MissionControlPendingInput
-}
-
-export interface JobActionResult {
-  jobId: string
-  state: JobState
-  failureReason?: string
-}
-
-export interface JobProgressUpdateResult {
-  jobId: string
-  state: JobState
-  eventId: string
 }
 
 export type DeepPartial<T> = {

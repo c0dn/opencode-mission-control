@@ -206,225 +206,27 @@ describe("mc_session_tail tool", () => {
   })
 })
 
-describe("job tools", () => {
-  test("mc_job_start forwards caller session and message context", async () => {
-    const calls: unknown[] = []
-
-    const tools = createMissionControlTools({
-      config: DEFAULT_CONFIG,
-      async startJob(args: unknown, caller: unknown) {
-        calls.push({ args, caller })
-        return {
-          ok: true,
-          data: {
-            jobId: "job_123",
-            sessionId: "ses_parent",
-            childSessionId: "ses_child",
-            state: "running",
-          },
-        }
-      },
-    } as any)
-
-    await tools.mc_job_start.execute(
-      {
-        prompt: "Do work",
-        title: "Background work",
-      } as any,
-      {
-        sessionID: "parent-session",
-        messageID: "message-1",
-        directory: "/tmp/project",
-        worktree: "/tmp/project",
-      } as any,
-    )
-
-    expect(calls).toEqual([
-      {
-        args: {
-          prompt: "Do work",
-          title: "Background work",
-        },
-        caller: {
-          sessionId: "parent-session",
-          messageId: "message-1",
-          directory: "/tmp/project",
-          worktree: "/tmp/project",
-        },
-      },
-    ])
-  })
-
-  test("mc_job_start no longer exposes sessionId in its public tool args", () => {
-    const tools = createMissionControlTools({
-      config: DEFAULT_CONFIG,
-      async startJob() {
-        return {
-          ok: true,
-          data: {
-            jobId: "job_123",
-            sessionId: "ses_parent",
-            childSessionId: "ses_child",
-            state: "running",
-          },
-        }
-      },
-    } as any)
-
-    expect((tools.mc_job_start as any).args.sessionId).toBeUndefined()
-  })
-
-  test("mc_job_events forwards the public args unchanged", async () => {
-    const calls: unknown[] = []
-
-    const tools = createMissionControlTools({
-      config: DEFAULT_CONFIG,
-      jobEvents(args: unknown) {
-        calls.push(args)
-        return {
-          ok: true,
-          data: {
-            jobId: "job_123",
-            events: [],
-          },
-        }
-      },
-    } as any)
-
-    await tools.mc_job_events.execute({ jobId: "job_123", limit: 15 } as any, {} as any)
-
-    expect(Object.keys(tools.mc_job_events.args).sort()).toEqual(["jobId", "limit"])
-    expect(calls).toEqual([{ jobId: "job_123", limit: 15 }])
-  })
-
-  test("mc_job_update forwards caller context for child-session inference", async () => {
-    const calls: unknown[] = []
-
-    const tools = createMissionControlTools({
-      config: DEFAULT_CONFIG,
-      async updateJobProgress(args: unknown, caller: unknown) {
-        calls.push({ args, caller })
-        return {
-          ok: true,
-          data: {
-            jobId: "job_123",
-            state: "running",
-            eventId: "evt_1",
-          },
-        }
-      },
-    } as any)
-
-    await tools.mc_job_update.execute(
-      {
-        message: "checkpoint",
-        notifyParent: true,
-      } as any,
-      {
-        sessionID: "child-session",
-        messageID: "message-1",
-        directory: "/tmp/project",
-        worktree: "/tmp/project",
-      } as any,
-    )
-
-    expect(Object.keys(tools.mc_job_update.args).sort()).toEqual(["jobId", "message", "notifyParent"].sort())
-    expect(calls).toEqual([
-      {
-        args: {
-          jobId: undefined,
-          message: "checkpoint",
-          notifyParent: true,
-        },
-        caller: {
-          sessionId: "child-session",
-          messageId: "message-1",
-          directory: "/tmp/project",
-          worktree: "/tmp/project",
-        },
-      },
-    ])
-  })
-
-  test("mc_job_pending_input forwards the job id unchanged", async () => {
-    const calls: string[] = []
-
-    const tools = createMissionControlTools({
-      config: DEFAULT_CONFIG,
-      jobPendingInput(jobId: string) {
-        calls.push(jobId)
-        return {
-          ok: true,
-          data: {
-            jobId,
-            state: "running",
-            pendingInput: {
-              kind: "permission",
-              requestId: "per_1",
-              permission: "bash",
-              patterns: ["git push"],
-              always: [],
-            },
-          },
-        }
-      },
-    } as any)
-
-    expect(Object.keys(tools.mc_job_pending_input.args)).toEqual(["jobId"])
-    await tools.mc_job_pending_input.execute({ jobId: "job_123" } as any, {} as any)
-    expect(calls).toEqual(["job_123"])
-  })
-
-  test("permission and question reply tools forward the public v2 args", async () => {
-    const permissionCalls: unknown[] = []
-    const questionCalls: unknown[] = []
-    const rejectCalls: unknown[] = []
-
-    const tools = createMissionControlTools({
-      config: DEFAULT_CONFIG,
-      async replyJobPermission(args: unknown) {
-        permissionCalls.push(args)
-        return { ok: true, data: {} }
-      },
-      async replyJobQuestion(args: unknown) {
-        questionCalls.push(args)
-        return { ok: true, data: {} }
-      },
-      async rejectJobQuestion(jobId: string) {
-        rejectCalls.push(jobId)
-        return { ok: true, data: {} }
-      },
-    } as any)
-
-    await tools.mc_job_permission_reply.execute({ jobId: "job_123", reply: "once", message: "ok" } as any, {} as any)
-    await tools.mc_job_question_reply.execute({ jobId: "job_123", answers: [["src/"]] } as any, {} as any)
-    await tools.mc_job_question_reject.execute({ jobId: "job_123" } as any, {} as any)
-
-    expect(permissionCalls).toEqual([{ jobId: "job_123", reply: "once", message: "ok" }])
-    expect(questionCalls).toEqual([{ jobId: "job_123", answers: [["src/"]] }])
-    expect(rejectCalls).toEqual(["job_123"])
-  })
-
-  test("jobs-only tool surface excludes session inspection tools", () => {
+describe("tool surface", () => {
+  test("legacy orchestration-only tool surface is normalized to session inspection tools", () => {
     const tools = createMissionControlTools({
       config: {
         ...DEFAULT_CONFIG,
         tools: {
-          surface: "jobs-only",
+          surface: "jobs" + "-only" as never,
         },
       },
     } as any)
 
-    expect(tools.mc_job_status).toBeDefined()
-    expect(tools.mc_job_pending_input).toBeDefined()
-    expect(tools.mc_session_read).toBeUndefined()
-    expect(tools.mc_session_get).toBeUndefined()
-    expect(tools.mc_session_find).toBeUndefined()
-    expect(tools.mc_session_tail).toBeUndefined()
-    expect(tools.mc_session_search).toBeUndefined()
+    expect(tools.mc_status).toBeDefined()
+    expect(tools.mc_session_read).toBeDefined()
+    expect(tools.mc_session_get).toBeDefined()
+    expect(tools.mc_session_find).toBeDefined()
+    expect(tools.mc_session_tail).toBeDefined()
+    expect(tools.mc_session_search).toBeDefined()
+    expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "job_"))).toBe(false)
   })
 
-  test("inspect-only tool surface excludes job orchestration tools", () => {
+  test("inspect-only tool surface keeps session inspection tools only", () => {
     const tools = createMissionControlTools({
       config: {
         ...DEFAULT_CONFIG,
@@ -439,8 +241,6 @@ describe("job tools", () => {
     expect(tools.mc_session_get).toBeDefined()
     expect(tools.mc_session_find).toBeDefined()
     expect(tools.mc_session_tail).toBeDefined()
-    expect(tools.mc_job_status).toBeUndefined()
-    expect(tools.mc_job_start).toBeUndefined()
-    expect(tools.mc_job_pending_input).toBeUndefined()
+    expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "job_"))).toBe(false)
   })
 })

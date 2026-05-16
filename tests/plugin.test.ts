@@ -15,8 +15,8 @@ describe("MissionControlPlugin tool guidance", () => {
   test("applyMissionControlToolGuidance augments known tools without depending on exact prose", () => {
     for (const [toolID, description] of [
       ["mc_session_search", "Search indexed session content"],
-      ["mc_job_start", "Launch a background child-session job"],
-      ["mc_job_result", "Get the latest stable result snapshot for a background job"],
+      ["mc_session_read", "Read one session transcript"],
+      ["mc_session_events", "Return recent events and live status for a session"],
     ] as const) {
       const augmented = applyMissionControlToolGuidance(toolID, description)
 
@@ -34,16 +34,6 @@ describe("MissionControlPlugin tool guidance", () => {
       sessionTree: async () => ({}),
       observeSession: async () => ({}),
       searchSessions: async () => ({}),
-      startJob: async () => ({}),
-      jobStatus: () => ({}),
-      jobEvents: () => ({}),
-      listJobs: () => ({}),
-      updateJobProgress: async () => ({}),
-      replyJobPermission: async () => ({}),
-      replyJobQuestion: async () => ({}),
-      rejectJobQuestion: async () => ({}),
-      cancelJob: async () => ({}),
-      jobResult: async () => ({}),
       onRuntimeEvent: async () => undefined,
     }) as any)
 
@@ -61,14 +51,14 @@ describe("MissionControlPlugin tool guidance", () => {
 
     const parameters = { keep: true }
     const output = {
-      description: "Launch a background child-session job",
+      description: "Search indexed session content",
       parameters,
     }
 
-    await hooks["tool.definition"]?.({ toolID: "mc_job_start" } as any, output as any)
+    await hooks["tool.definition"]?.({ toolID: "mc_session_search" } as any, output as any)
 
-    expect(output.description).toContain("Launch a background child-session job")
-    expect(output.description.length).toBeGreaterThan("Launch a background child-session job".length)
+    expect(output.description).toContain("Search indexed session content")
+    expect(output.description.length).toBeGreaterThan("Search indexed session content".length)
     expect(output.parameters).toBe(parameters)
   })
 
@@ -80,16 +70,6 @@ describe("MissionControlPlugin tool guidance", () => {
       sessionTree: async () => ({}),
       observeSession: async () => ({}),
       searchSessions: async () => ({}),
-      startJob: async () => ({}),
-      jobStatus: () => ({}),
-      jobEvents: () => ({}),
-      listJobs: () => ({}),
-      updateJobProgress: async () => ({}),
-      replyJobPermission: async () => ({}),
-      replyJobQuestion: async () => ({}),
-      rejectJobQuestion: async () => ({}),
-      cancelJob: async () => ({}),
-      jobResult: async () => ({}),
       onRuntimeEvent: async () => undefined,
     }) as any)
 
@@ -127,16 +107,6 @@ describe("MissionControlPlugin runtime hooks", () => {
       sessionTree: async () => ({}),
       observeSession: async () => ({}),
       searchSessions: async () => ({}),
-      startJob: async () => ({}),
-      jobStatus: () => ({}),
-      jobEvents: () => ({}),
-      listJobs: () => ({}),
-      updateJobProgress: async () => ({}),
-      replyJobPermission: async () => ({}),
-      replyJobQuestion: async () => ({}),
-      rejectJobQuestion: async () => ({}),
-      cancelJob: async () => ({}),
-      jobResult: async () => ({}),
       async onRuntimeEvent(type: string, payload: unknown) {
         forwarded.push({ type, payload })
       },
@@ -163,6 +133,18 @@ describe("MissionControlPlugin runtime hooks", () => {
     } as any)
     await hooks.event?.({
       event: {
+        type: "session.compacted",
+        properties: { sessionID: "session-2" },
+      },
+    } as any)
+    await hooks.event?.({
+      event: {
+        type: "message.removed",
+        properties: { sessionID: "session-3" },
+      },
+    } as any)
+    await hooks.event?.({
+      event: {
         type: "something.else",
         properties: { sessionID: "ignored" },
       },
@@ -172,6 +154,14 @@ describe("MissionControlPlugin runtime hooks", () => {
       {
         type: supportedEvent,
         payload: { sessionID: "session-1" },
+      },
+      {
+        type: "session.compacted",
+        payload: { sessionID: "session-2" },
+      },
+      {
+        type: "message.removed",
+        payload: { sessionID: "session-3" },
       },
     ])
   })

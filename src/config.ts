@@ -30,16 +30,6 @@ export const DEFAULT_CONFIG: MissionControlConfig = {
   tools: {
     surface: "full",
   },
-  jobs: {
-    enabled: true,
-    maxConcurrent: 2,
-    titlePrefix: "Mission Control",
-    keepChildSessionOnCompletion: true,
-  },
-  safety: {
-    autoApprovePermissions: false,
-    autoAnswerQuestions: false,
-  },
   debug: {
     enabled: false,
   },
@@ -61,16 +51,7 @@ export const createMissionControlConfig = (
     tools: {
       ...DEFAULT_CONFIG.tools,
       ...overrides.tools,
-    },
-    jobs: {
-      ...DEFAULT_CONFIG.jobs,
-      ...overrides.jobs,
-    },
-    safety: {
-      ...DEFAULT_CONFIG.safety,
-      ...overrides.safety,
-      autoApprovePermissions: false,
-      autoAnswerQuestions: false,
+      surface: normalizeToolSurface(overrides.tools?.surface),
     },
     debug: {
       ...DEFAULT_CONFIG.debug,
@@ -114,8 +95,6 @@ export const resolveMissionControlRuntime = (
     },
     observe: options.observe,
     tools: options.tools,
-    jobs: options.jobs,
-    safety: options.safety,
     debug: options.debug,
   })
 
@@ -140,3 +119,6 @@ const normalizeVectorBackendPreference = (value: unknown): VectorBackendPreferen
   typeof value === "string" && VECTOR_BACKEND_PREFERENCES.has(value as VectorBackendPreference)
     ? (value as VectorBackendPreference)
     : DEFAULT_CONFIG.search.vectorBackend
+
+const normalizeToolSurface = (value: unknown) =>
+  value === "inspect-only" ? "inspect-only" : DEFAULT_CONFIG.tools.surface

@@ -1,6 +1,4 @@
 import { MissionControlIndexDB } from "./index-db.js"
-import { MissionControlJobController } from "./jobs.js"
-import { MissionControlJobLauncher } from "./launcher.js"
 import { OpenCodeAdapter } from "./opencode-client.js"
 import { MissionControlRuntimeState } from "./runtime-state.js"
 import { MissionControlSearchService } from "./search.js"
@@ -9,20 +7,12 @@ import { extractSessionID } from "./session-extractors.js"
 import { MissionControlSessionService } from "./session-service.js"
 import { MissionControlSourceDB } from "./source-db.js"
 import type {
-  JobEventsArgs,
-  JobListArgs,
-  JobPermissionReplyArgs,
-  JobProgressUpdateArgs,
-  JobQuestionReplyArgs,
-  JobStartArgs,
   MissionControlCapabilityMatrix,
   MissionControlConfig,
   MissionControlRuntimeSecrets,
   MissionControlStatus,
   SessionFindArgs,
-  ToolCallerContext,
 } from "./types.js"
-import { fail } from "./types.js"
 
 type PluginContext = {
   client: any
@@ -54,8 +44,6 @@ export class MissionControlServer {
   private readonly sourceDB: MissionControlSourceDB
   private readonly searchService: MissionControlSearchService
   private readonly sessionService: MissionControlSessionService
-  private readonly jobController: MissionControlJobController
-  private readonly jobLauncher: MissionControlJobLauncher
   private started = false
 
   constructor(context: PluginContext, config: MissionControlConfig, secrets: MissionControlRuntimeSecrets) {
@@ -75,8 +63,6 @@ export class MissionControlServer {
     this.sourceDB = new MissionControlSourceDB()
     this.searchService = new MissionControlSearchService(this.sourceDB, this.runtimeState)
     this.sessionService = new MissionControlSessionService(this.runtimeState, this.sourceDB)
-    this.jobController = new MissionControlJobController(rootDir, config)
-    this.jobLauncher = new MissionControlJobLauncher(() => this.config, this.jobController)
   }
 
   static async fromContext(context: PluginContext, config: MissionControlConfig, secrets: MissionControlRuntimeSecrets) {
@@ -115,7 +101,6 @@ export class MissionControlServer {
     })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState.setBufferSize(config.observe.eventBufferSize)
-    this.jobController.rebind(rootDir, config)
   }
 
   async start() {
@@ -126,32 +111,10 @@ export class MissionControlServer {
     }
 
     this.started = true
-    try {
-      await this.jobController.start()
-      const loadWarning = this.jobController.consumeLoadWarning()
-      if (loadWarning) {
-        await adapter.log("warn", loadWarning, {
-          directory: this.context.directory,
-          worktree: this.context.worktree,
-        })
-      }
-    } catch (error) {
-      this.jobController.clearRecoveredState()
-      await adapter.log(
-        "warn",
-        "Mission Control could not load the persisted jobs store; starting with an empty in-memory job state instead.",
-        {
-          directory: this.context.directory,
-          worktree: this.context.worktree,
-          error: error instanceof Error ? error.message : String(error),
-        },
-      )
-    }
     await adapter.debug("Mission Control server started", {
       directory: this.context.directory,
       worktree: this.context.worktree,
       debugFileEnabled: this.config.debug.enabled,
-      jobsEnabled: this.config.jobs.enabled,
     })
     await adapter.log("info", "Mission Control plugin initialized", {
       directory: this.context.directory,
@@ -160,8 +123,7 @@ export class MissionControlServer {
   }
 
   capabilities(): MissionControlCapabilityMatrix {
-    const exposesSessionTools = this.config.tools.surface !== "jobs-only"
-    const exposesJobTools = this.config.tools.surface !== "inspect-only"
+    const exposesSessionTools = true
 
     return {
       search: {
@@ -176,20 +138,6 @@ export class MissionControlServer {
       observe: {
         liveEvents: exposesSessionTools,
         recentBuffer: exposesSessionTools,
-      },
-      jobs: {
-        childSessionLaunch: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsChildSessionLaunch(),
-        asyncPrompt: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsAsyncPrompt(),
-        resultRelay: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsResultRelay(),
-        blockedInputRelay: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsResultRelay(),
-        abort: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsAbortSession(),
-        permissionReply: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsPermissionReply(),
-        questionReply: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsQuestionReply(),
-        questionReject: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsQuestionReject(),
-        pendingInputDetails: exposesJobTools && this.config.jobs.enabled,
-        parentReplies: exposesJobTools && this.config.jobs.enabled && this.adapter.supportsParentReplies(),
-        eventFeed: exposesJobTools && this.config.jobs.enabled,
-        progressUpdates: exposesJobTools && this.config.jobs.enabled,
       },
     }
   }
@@ -210,17 +158,13 @@ export class MissionControlServer {
       startedAt: this.startedAt,
       directory: rootDir,
       implemented: {
-        sessionGet: this.config.tools.surface !== "jobs-only",
-        sessionFind: this.config.tools.surface !== "jobs-only",
-        sessionRead: this.config.tools.surface !== "jobs-only",
-        sessionTail: this.config.tools.surface !== "jobs-only",
-        sessionTree: this.config.tools.surface !== "jobs-only",
-        sessionObserve: this.config.tools.surface !== "jobs-only",
-        sessionSearch:
-          this.config.tools.surface !== "jobs-only" &&
-          (this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false)),
-        jobPendingInput: this.config.tools.surface !== "inspect-only",
-        jobStart: this.config.tools.surface !== "inspect-only" && this.config.jobs.enabled,
+        sessionGet: true,
+        sessionFind: true,
+        sessionRead: true,
+        sessionTail: true,
+        sessionTree: true,
+        sessionObserve: true,
+        sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
       },
       config: this.config,
       counters: this.runtimeState.counters(),
@@ -248,8 +192,6 @@ export class MissionControlServer {
     if (sessionID && shouldPersistSearchInvalidation(type)) {
       await new MissionControlIndexDB(rootDir, this.config.search.indexPath).markDirtySessions([sessionID])
     }
-    const adapter = this.adapter
-    await this.jobController.handleEvent(adapter, type, payload)
   }
 
   async readSession(
@@ -310,64 +252,6 @@ export class MissionControlServer {
     return this.searchService.search(adapter, this.config, rootDir, args, this.semanticProvider)
   }
 
-  async startJob(args: JobStartArgs, caller: ToolCallerContext = {}) {
-    const adapter = this.adapter
-    return this.jobLauncher.launch(adapter, args, caller)
-  }
-
-  jobStatus(jobID: string) {
-    return this.jobController.status(jobID)
-  }
-
-  jobPendingInput(jobID: string) {
-    return this.jobController.pendingInput(jobID)
-  }
-
-  listJobs(args: JobListArgs = {}) {
-    return this.jobController.listJobs(args)
-  }
-
-  jobEvents(args: JobEventsArgs) {
-    return this.jobController.jobEvents(args.jobId, args.limit)
-  }
-
-  async updateJobProgress(args: JobProgressUpdateArgs, caller: ToolCallerContext = {}) {
-    const adapter = this.adapter
-    return this.jobController.updateProgress(adapter, args, caller)
-  }
-
-  async replyJobPermission(args: JobPermissionReplyArgs, caller: ToolCallerContext = {}) {
-    const adapter = this.adapter
-    return this.jobController.replyPermission(adapter, args, caller)
-  }
-
-  async replyJobQuestion(args: JobQuestionReplyArgs, caller: ToolCallerContext = {}) {
-    const adapter = this.adapter
-    return this.jobController.replyQuestion(adapter, args, caller)
-  }
-
-  async rejectJobQuestion(jobId: string, caller: ToolCallerContext = {}) {
-    const adapter = this.adapter
-    return this.jobController.rejectQuestion(adapter, jobId, caller)
-  }
-
-  async cancelJob(jobID: string, caller: ToolCallerContext = {}) {
-    const adapter = this.adapter
-    return this.jobController.cancelJob(adapter, jobID, caller)
-  }
-
-  async jobResult(jobID: string, sendToParent: boolean, caller: ToolCallerContext = {}) {
-    const adapter = this.adapter
-    return this.jobController.getResult(adapter, jobID, sendToParent, caller)
-  }
-
-  notImplemented(feature: string, suggestion?: string) {
-    return fail(
-      "NotImplemented",
-      `${feature} is not implemented in the initial scaffold yet.`,
-      suggestion,
-    )
-  }
 }
 
 const shouldPersistSearchInvalidation = (type: string) =>

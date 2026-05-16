@@ -18,178 +18,7 @@ afterEach(async () => {
   }
 })
 
-describe("OpenCodeAdapter pending input APIs", () => {
-  test("calls native permission and question reply endpoints with directory scope", async () => {
-    const calls: Array<{ method: string; args: unknown }> = []
-    const adapter = new OpenCodeAdapter({
-      permission: {
-        async reply(args: unknown) {
-          calls.push({ method: "permission.reply", args })
-          return true
-        },
-      },
-      question: {
-        async reply(args: unknown) {
-          calls.push({ method: "question.reply", args })
-          return true
-        },
-        async reject(args: unknown) {
-          calls.push({ method: "question.reject", args })
-          return true
-        },
-      },
-      session: {},
-    })
-
-    await adapter.replyPermissionRequest("perm-1", "once", "allow it", "/tmp/project")
-    await adapter.replyQuestionRequest("question-1", [["src/"]], "/tmp/project")
-    await adapter.rejectQuestionRequest("question-2", "/tmp/project")
-
-    expect(calls).toEqual([
-      {
-        method: "permission.reply",
-        args: {
-          requestID: "perm-1",
-          reply: "once",
-          message: "allow it",
-          directory: "/tmp/project",
-        },
-      },
-      {
-        method: "question.reply",
-        args: {
-          requestID: "question-1",
-          answers: [["src/"]],
-          directory: "/tmp/project",
-        },
-      },
-      {
-        method: "question.reject",
-        args: {
-          requestID: "question-2",
-          directory: "/tmp/project",
-        },
-      },
-    ])
-  })
-
-  test("lists pending permission and question requests via native SDK endpoints", async () => {
-    const calls: Array<{ method: string; args: unknown }> = []
-    const adapter = new OpenCodeAdapter({
-      permission: {
-        async list(args: unknown) {
-          calls.push({ method: "permission.list", args })
-          return [{ id: "perm-1" }]
-        },
-      },
-      question: {
-        async list(args: unknown) {
-          calls.push({ method: "question.list", args })
-          return [{ id: "question-1" }]
-        },
-      },
-      session: {},
-    })
-
-    expect(await adapter.listPendingPermissions("/tmp/project")).toEqual([{ id: "perm-1" }])
-    expect(await adapter.listPendingQuestions("/tmp/project")).toEqual([{ id: "question-1" }])
-    expect(calls).toEqual([
-      { method: "permission.list", args: { directory: "/tmp/project" } },
-      { method: "question.list", args: { directory: "/tmp/project" } },
-    ])
-  })
-
-  test("uses the official sdk client for permission and question APIs", async () => {
-    const calls: Array<{ method: string; args: unknown; options?: unknown }> = []
-    const adapter = new OpenCodeAdapter(
-      { session: {} },
-      {
-        sdkClient: {
-          permission: {
-            async list(args: unknown, options?: unknown) {
-              calls.push({ method: "permission.list", args, options })
-              return [{ id: "perm-sdk" }]
-            },
-            async reply(args: unknown, options?: unknown) {
-              calls.push({ method: "permission.reply", args, options })
-              return true
-            },
-          },
-          question: {
-            async list(args: unknown, options?: unknown) {
-              calls.push({ method: "question.list", args, options })
-              return [{ id: "question-sdk" }]
-            },
-            async reply(args: unknown, options?: unknown) {
-              calls.push({ method: "question.reply", args, options })
-              return true
-            },
-            async reject(args: unknown, options?: unknown) {
-              calls.push({ method: "question.reject", args, options })
-              return true
-            },
-          },
-          session: {
-            async messages() {
-              return []
-            },
-          },
-        },
-      },
-    )
-
-    expect(adapter.supportsPermissionReply()).toBe(true)
-    expect(adapter.supportsQuestionReply()).toBe(true)
-    expect(adapter.supportsQuestionReject()).toBe(true)
-    expect(adapter.supportsParentReplies()).toBe(true)
-    expect(adapter.supportsSessionMessagePaging()).toBe(true)
-
-    expect(await adapter.listPendingPermissions("/tmp/project")).toEqual([{ id: "perm-sdk" }])
-    expect(await adapter.listPendingQuestions("/tmp/project")).toEqual([{ id: "question-sdk" }])
-    expect(await adapter.replyPermissionRequest("perm-1", "once", "allow it", "/tmp/project")).toBe(true)
-    expect(await adapter.replyQuestionRequest("question-1", [["src/"]], "/tmp/project")).toBe(true)
-    expect(await adapter.rejectQuestionRequest("question-2", "/tmp/project")).toBe(true)
-
-    expect(calls).toEqual([
-      {
-        method: "permission.list",
-        args: { directory: "/tmp/project" },
-        options: { responseStyle: "data", throwOnError: true },
-      },
-      {
-        method: "question.list",
-        args: { directory: "/tmp/project" },
-        options: { responseStyle: "data", throwOnError: true },
-      },
-      {
-        method: "permission.reply",
-        args: {
-          requestID: "perm-1",
-          reply: "once",
-          message: "allow it",
-          directory: "/tmp/project",
-        },
-        options: { responseStyle: "data", throwOnError: true },
-      },
-      {
-        method: "question.reply",
-        args: {
-          requestID: "question-1",
-          answers: [["src/"]],
-          directory: "/tmp/project",
-        },
-        options: { responseStyle: "data", throwOnError: true },
-      },
-      {
-        method: "question.reject",
-        args: {
-          requestID: "question-2",
-          directory: "/tmp/project",
-        },
-        options: { responseStyle: "data", throwOnError: true },
-      },
-    ])
-  })
+describe("OpenCodeAdapter session APIs", () => {
 
   test("uses experimental session listing for unscoped global discovery when an sdk client is available", async () => {
     const calls: Array<{ method: string; args: unknown; options?: unknown }> = []
@@ -393,7 +222,7 @@ describe("OpenCodeAdapter pending input APIs", () => {
     ])
   })
 
-  test("constructs a real v2 sdk client from serverUrl and uses public HTTP endpoints", async () => {
+  test("constructs a real v2 sdk client from serverUrl and uses public session HTTP endpoints", async () => {
     const requests: Array<{ method: string; pathname: string; search: string }> = []
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1")
@@ -402,12 +231,6 @@ describe("OpenCodeAdapter pending input APIs", () => {
         pathname: url.pathname,
         search: url.search,
       })
-
-      if (url.pathname === "/permission") {
-        res.writeHead(200, { "content-type": "application/json" })
-        res.end(JSON.stringify([{ id: "perm-live" }]))
-        return
-      }
 
       if (url.pathname === "/session/live-session/message") {
         res.writeHead(200, {
@@ -448,8 +271,6 @@ describe("OpenCodeAdapter pending input APIs", () => {
         },
       )
 
-      expect(await adapter.listPendingPermissions()).toEqual([{ id: "perm-live" }])
-
       expect(
         await adapter.getSessionMessagePage("live-session", {
           limit: 2,
@@ -464,236 +285,18 @@ describe("OpenCodeAdapter pending input APIs", () => {
         nextCursor: "cursor-2",
       })
 
-      expect(requests).toHaveLength(2)
-      expect(requests[0]).toEqual({
-        method: "GET",
-        pathname: "/permission",
-        search: "?directory=%2Ftmp%2Fproject",
-      })
-      expect(requests[1]).toMatchObject({
+      expect(requests).toHaveLength(1)
+      expect(requests[0]).toMatchObject({
         method: "GET",
         pathname: "/session/live-session/message",
       })
-      expect(requests[1]?.search).toContain("limit=2")
-      expect(requests[1]?.search).toContain("directory=%2Ftmp%2Fproject")
+      expect(requests[0]?.search).toContain("limit=2")
+      expect(requests[0]?.search).toContain("directory=%2Ftmp%2Fproject")
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()))
       })
     }
-  })
-
-  test("recovers serverUrl from the hidden internal client baseUrl config", async () => {
-    const requests: Array<{ method: string; pathname: string; search: string }> = []
-    const server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? "/", "http://127.0.0.1")
-      requests.push({
-        method: req.method ?? "GET",
-        pathname: url.pathname,
-        search: url.search,
-      })
-
-      if (url.pathname === "/permission") {
-        res.writeHead(200, { "content-type": "application/json" })
-        res.end(JSON.stringify([{ id: "perm-hidden" }]))
-        return
-      }
-
-      res.writeHead(404, { "content-type": "application/json" })
-      res.end(JSON.stringify({ message: `Unexpected path: ${url.pathname}` }))
-    })
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject)
-      server.listen(0, "127.0.0.1", () => resolve())
-    })
-
-    try {
-      const address = server.address()
-      if (!address || typeof address === "string") {
-        throw new Error("Expected an ephemeral TCP server address")
-      }
-
-      const adapter = new OpenCodeAdapter(
-        {
-          _client: {
-            getConfig: () => ({
-              baseUrl: `http://127.0.0.1:${address.port}`,
-            }),
-          },
-          session: {},
-        },
-        {
-          directory: "/tmp/project",
-        },
-      )
-
-      expect(await adapter.listPendingPermissions()).toEqual([{ id: "perm-hidden" }])
-      expect(requests).toEqual([
-        {
-          method: "GET",
-          pathname: "/permission",
-          search: "?directory=%2Ftmp%2Fproject",
-        },
-      ])
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()))
-      })
-    }
-  })
-
-  test("prefers hidden internal client baseUrl over a stale context serverUrl", async () => {
-    const requests: Array<{ method: string; pathname: string; search: string }> = []
-    const server = createServer(async (req, res) => {
-      const url = new URL(req.url ?? "/", "http://127.0.0.1")
-      requests.push({
-        method: req.method ?? "GET",
-        pathname: url.pathname,
-        search: url.search,
-      })
-
-      if (url.pathname === "/permission") {
-        res.writeHead(200, { "content-type": "application/json" })
-        res.end(JSON.stringify([{ id: "perm-preferred" }]))
-        return
-      }
-
-      res.writeHead(404, { "content-type": "application/json" })
-      res.end(JSON.stringify({ message: `Unexpected path: ${url.pathname}` }))
-    })
-
-    await new Promise<void>((resolve, reject) => {
-      server.once("error", reject)
-      server.listen(0, "127.0.0.1", () => resolve())
-    })
-
-    try {
-      const address = server.address()
-      if (!address || typeof address === "string") {
-        throw new Error("Expected an ephemeral TCP server address")
-      }
-
-      const adapter = new OpenCodeAdapter(
-        {
-          _client: {
-            getConfig: () => ({
-              baseUrl: `http://127.0.0.1:${address.port}`,
-            }),
-          },
-          session: {},
-        },
-        {
-          serverUrl: new URL("http://127.0.0.1:1"),
-          directory: "/tmp/project",
-        },
-      )
-
-      expect(await adapter.listPendingPermissions()).toEqual([{ id: "perm-preferred" }])
-      expect(requests).toEqual([
-        {
-          method: "GET",
-          pathname: "/permission",
-          search: "?directory=%2Ftmp%2Fproject",
-        },
-      ])
-    } finally {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()))
-      })
-    }
-  })
-
-  test("prefers session.prompt for fire-and-forget parent relays when it succeeds", async () => {
-    const calls: Array<{ method: string; args: unknown }> = []
-    const adapter = new OpenCodeAdapter({
-      session: {
-        async promptAsync(args: unknown) {
-          calls.push({ method: "session.promptAsync", args })
-          return true
-        },
-        async prompt(args: unknown) {
-          calls.push({ method: "session.prompt", args })
-          return true
-        },
-      },
-    })
-
-    await adapter.promptNoReply("parent-session", "relay payload", "/tmp/project")
-
-    expect(calls).toEqual([
-      {
-        method: "session.prompt",
-        args: {
-          query: { directory: "/tmp/project" },
-          path: { id: "parent-session" },
-          body: {
-            noReply: true,
-            parts: [{ type: "text", text: "relay payload" }],
-          },
-        },
-      },
-    ])
-  })
-
-  test("treats empty no-reply prompt responses as success instead of surfacing JSON EOF parse errors", async () => {
-    const calls: Array<{ method: string; args: unknown }> = []
-    const adapter = new OpenCodeAdapter({
-      session: {
-        async prompt(args: unknown) {
-          calls.push({ method: "session.prompt", args })
-          throw new Error("JSON Parse error: Unexpected EOF")
-        },
-        async promptAsync(args: unknown) {
-          calls.push({ method: "session.promptAsync", args })
-          return true
-        },
-      },
-    })
-
-    await adapter.promptNoReply("parent-session", "relay payload", "/tmp/project")
-
-    expect(calls).toEqual([
-      {
-        method: "session.prompt",
-        args: {
-          query: { directory: "/tmp/project" },
-          path: { id: "parent-session" },
-          body: {
-            noReply: true,
-            parts: [{ type: "text", text: "relay payload" }],
-          },
-        },
-      },
-    ])
-  })
-
-  test("treats empty no-reply promptAsync responses as success when session.prompt is unavailable", async () => {
-    const calls: Array<{ method: string; args: unknown }> = []
-    const adapter = new OpenCodeAdapter({
-      session: {
-        async promptAsync(args: unknown) {
-          calls.push({ method: "session.promptAsync", args })
-          throw new Error("JSON Parse error: Unexpected end of JSON input")
-        },
-      },
-    })
-
-    await adapter.promptNoReply("parent-session", "relay payload", "/tmp/project")
-
-    expect(calls).toEqual([
-      {
-        method: "session.promptAsync",
-        args: {
-          query: { directory: "/tmp/project" },
-          path: { id: "parent-session" },
-          body: {
-            noReply: true,
-            parts: [{ type: "text", text: "relay payload" }],
-          },
-        },
-      },
-    ])
   })
 
   test("writes structured debug entries to a dedicated debug file when enabled", async () => {
@@ -732,71 +335,6 @@ describe("OpenCodeAdapter pending input APIs", () => {
         messageId: "msg_test",
       },
     })
-  })
-
-  test("recovers the actual caller session from the current message id", async () => {
-    const adapter = new OpenCodeAdapter({
-      session: {
-        async get({ path }: { path: { id: string } }) {
-          return {
-            id: path.id,
-            directory: "/tmp/project",
-            title: path.id,
-            time: { created: 1, updated: path.id === "actual-session" ? 20 : 10 },
-          }
-        },
-        async list() {
-          return [
-            { id: "stale-session", directory: "/tmp/project", time: { created: 1, updated: 10 } },
-            { id: "actual-session", directory: "/tmp/project", time: { created: 2, updated: 20 } },
-          ]
-        },
-        async messages({ path }: { path: { id: string } }) {
-          return path.id === "actual-session"
-            ? [{ info: { id: "message-1" }, parts: [] }]
-            : [{ info: { id: "other-message" }, parts: [] }]
-        },
-      },
-    })
-
-    const resolved = await adapter.resolveCallerSession({
-      sessionId: "stale-session",
-      messageId: "message-1",
-      directory: "/tmp/project",
-    })
-
-    expect(resolved).toEqual({
-      sessionID: "actual-session",
-      directory: "/tmp/project",
-      mode: "message_owner_session",
-    })
-  })
-
-  test("fails closed when caller message ownership cannot be proven", async () => {
-    const adapter = new OpenCodeAdapter({
-      session: {
-        async get() {
-          throw new Error("not found")
-        },
-        async list() {
-          return [
-            { id: "stale-session", directory: "/tmp/project", time: { created: 1, updated: 10 } },
-            { id: "other-session", directory: "/tmp/project", time: { created: 2, updated: 20 } },
-          ]
-        },
-        async messages() {
-          return [{ info: { id: "different-message" }, parts: [] }]
-        },
-      },
-    })
-
-    const resolved = await adapter.resolveCallerSession({
-      sessionId: "stale-session",
-      messageId: "message-1",
-      directory: "/tmp/project",
-    })
-
-    expect(resolved).toBeUndefined()
   })
 
 })

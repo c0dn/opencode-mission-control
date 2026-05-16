@@ -26,7 +26,7 @@ mc_session_search({
 mc_session_search({ query: "retry logic", limit: 5 })
 
 mc_session_search({
-  query: "ParentSessionScopeUnavailable",
+  query: "SessionLookupUnavailable",
   scope: "global",
   exact: true,
   limit: 10,

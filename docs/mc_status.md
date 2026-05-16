@@ -5,7 +5,7 @@ Returns the current Mission Control runtime summary.
 ## Use it for
 
 - confirming the plugin is loaded
-- checking whether search/jobs are enabled
+- checking whether search is enabled
 - checking whether semantic retrieval is available
 - quick debugging of runtime config and counters
 - seeing which search index snapshot is currently active
@@ -28,22 +28,6 @@ The payload currently includes:
 - `counters`
 - `capabilities`
 - `index`
-
-The `capabilities.jobs` object includes fields such as:
-
-- `childSessionLaunch`
-- `asyncPrompt`
-- `resultRelay`
-- `blockedInputRelay`
-- `abort`
-- `permissionReply`
-- `questionReply`
-- `questionReject`
-- `parentReplies`
-- `eventFeed`
-- `progressUpdates`
-
-These are runtime capability probes. Some are tool-specific, so a runtime may support only part of the parent-action surface.
 
 The `index` object includes fields such as:
 

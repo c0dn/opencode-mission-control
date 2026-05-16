@@ -41,7 +41,7 @@ export class MissionControlSessionService {
       })
     } catch {
       await adapter.debug("getSession failed to resolve session", { sessionId })
-      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
+      return fail("SessionNotFound", `Session '${sessionId}' was not found.`)
     }
   }
 
@@ -425,7 +425,7 @@ export class MissionControlSessionService {
         depth,
       })
 
-      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
+      return fail("SessionNotFound", `Session '${sessionId}' was not found.`)
     }
   }
 
@@ -451,7 +451,7 @@ export class MissionControlSessionService {
         limit: options.limit,
       })
 
-      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
+      return fail("SessionNotFound", `Session '${sessionId}' was not found.`)
     }
 
     const sessionIDs = new Set<string>([sessionId])
@@ -596,7 +596,7 @@ export class MissionControlSessionService {
         withToolOutputs: debugContext.includeToolOutputs,
       })
 
-      return fail("ParentSessionNotFound", `Session '${sessionId}' was not found.`)
+      return fail("SessionNotFound", `Session '${sessionId}' was not found.`)
     }
 
     if (!withChildren) {

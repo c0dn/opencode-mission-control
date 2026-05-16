@@ -8,27 +8,21 @@ describe("createMissionControlConfig", () => {
       search: {
         semanticEnabled: true,
       },
-      jobs: {
-        maxConcurrent: 4,
-      },
     })
 
     expect(config.search.lexicalEnabled).toBe(true)
     expect(config.search.semanticEnabled).toBe(true)
-    expect(config.jobs.maxConcurrent).toBe(4)
     expect(config.observe.eventBufferSize).toBe(DEFAULT_CONFIG.observe.eventBufferSize)
   })
 
-  test("keeps MVP safety flags disabled even when overrides try to enable them", () => {
+  test("normalizes legacy orchestration-only surface to full session inspection", () => {
     const config = createMissionControlConfig({
-      safety: {
-        autoApprovePermissions: true as never,
-        autoAnswerQuestions: true as never,
+      tools: {
+        surface: "jobs" + "-only" as never,
       },
     })
 
-    expect(config.safety.autoApprovePermissions).toBe(false)
-    expect(config.safety.autoAnswerQuestions).toBe(false)
+    expect(config.tools.surface).toBe("full")
   })
 
   test("merges debug logging overrides without enabling them by default", () => {
@@ -103,15 +97,4 @@ describe("resolveMissionControlRuntime", () => {
     expect(secrets.search.jinaApiKey).toBe("test-key")
   })
 
-  test("does not allow runtime options to enable unsafe MVP safety flags", () => {
-    const { config } = resolveMissionControlRuntime({
-      safety: {
-        autoApprovePermissions: true as never,
-        autoAnswerQuestions: true as never,
-      },
-    })
-
-    expect(config.safety.autoApprovePermissions).toBe(false)
-    expect(config.safety.autoAnswerQuestions).toBe(false)
-  })
 })
