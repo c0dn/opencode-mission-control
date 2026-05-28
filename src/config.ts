@@ -51,7 +51,7 @@ export const createMissionControlConfig = (
     tools: {
       ...DEFAULT_CONFIG.tools,
       ...overrides.tools,
-      surface: normalizeToolSurface(overrides.tools?.surface),
+      surface: DEFAULT_CONFIG.tools.surface,
     },
     debug: {
       ...DEFAULT_CONFIG.debug,
@@ -119,6 +119,3 @@ const normalizeVectorBackendPreference = (value: unknown): VectorBackendPreferen
   typeof value === "string" && VECTOR_BACKEND_PREFERENCES.has(value as VectorBackendPreference)
     ? (value as VectorBackendPreference)
     : DEFAULT_CONFIG.search.vectorBackend
-
-const normalizeToolSurface = (value: unknown) =>
-  value === "inspect-only" ? "inspect-only" : DEFAULT_CONFIG.tools.surface

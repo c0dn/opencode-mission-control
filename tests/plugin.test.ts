@@ -165,4 +165,52 @@ describe("MissionControlPlugin runtime hooks", () => {
       },
     ])
   })
+
+  test("event disposes on official disposal events without forwarding them", async () => {
+    const forwarded: Array<{ type: string; payload: unknown }> = []
+    const disposed: string[] = []
+
+    MissionControlServer.fromContext = (async () => ({
+      config: DEFAULT_CONFIG,
+      status: async () => ({}),
+      readSession: async () => ({}),
+      sessionTree: async () => ({}),
+      observeSession: async () => ({}),
+      searchSessions: async () => ({}),
+      async onRuntimeEvent(type: string, payload: unknown) {
+        forwarded.push({ type, payload })
+      },
+      async dispose() {
+        disposed.push("disposed")
+      },
+    }) as any)
+
+    const hooks = await MissionControlPlugin({
+      client: {
+        app: {
+          async log() {
+            return undefined
+          },
+        },
+      },
+      directory: "/tmp/project",
+      worktree: "/tmp/project",
+    } as any)
+
+    await hooks.event?.({
+      event: {
+        type: "global.disposed",
+        properties: { sessionID: "ignored-1" },
+      },
+    } as any)
+    await hooks.event?.({
+      event: {
+        type: "server.instance.disposed",
+        properties: { sessionID: "ignored-2" },
+      },
+    } as any)
+
+    expect(disposed).toEqual(["disposed", "disposed"])
+    expect(forwarded).toEqual([])
+  })
 })

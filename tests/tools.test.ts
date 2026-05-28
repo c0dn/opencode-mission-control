@@ -4,6 +4,21 @@ import { DEFAULT_CONFIG } from "../src/config.ts"
 import { createMissionControlTools } from "../src/tools.ts"
 
 describe("mc_session_search tool", () => {
+  test("returns titled plugin result with output and metadata", async () => {
+    const payload = { ok: true, data: { name: "opencode-mission-control" } }
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async status() {
+        return payload
+      },
+    } as any)
+
+    const result = await tools.mc_status.execute({} as any, {} as any) as any
+    expect(result.title).toBe("Mission Control Status")
+    expect(result.output).toBe(JSON.stringify(payload, null, 2))
+    expect(result.metadata).toBe(payload)
+  })
+
   test("exposes the simplified public argument surface", async () => {
     const calls: unknown[] = []
 
@@ -207,7 +222,7 @@ describe("mc_session_tail tool", () => {
 })
 
 describe("tool surface", () => {
-  test("legacy orchestration-only tool surface is normalized to session inspection tools", () => {
+  test("legacy orchestration-only tool surface still exposes terminal command tools", () => {
     const tools = createMissionControlTools({
       config: {
         ...DEFAULT_CONFIG,
@@ -224,9 +239,12 @@ describe("tool surface", () => {
     expect(tools.mc_session_tail).toBeDefined()
     expect(tools.mc_session_search).toBeDefined()
     expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "job_"))).toBe(false)
+    expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "terminal_"))).toBe(true)
+    expect(tools.mc_terminal_start).toBeDefined()
+    expect(tools.mc_terminal_cancel).toBeDefined()
   })
 
-  test("inspect-only tool surface keeps session inspection tools only", () => {
+  test("inspect-only tool surface still exposes terminal command tools", () => {
     const tools = createMissionControlTools({
       config: {
         ...DEFAULT_CONFIG,
@@ -242,5 +260,40 @@ describe("tool surface", () => {
     expect(tools.mc_session_find).toBeDefined()
     expect(tools.mc_session_tail).toBeDefined()
     expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "job_"))).toBe(false)
+    expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "terminal_"))).toBe(true)
+    expect(tools.mc_terminal_start).toBeDefined()
+    expect(tools.mc_terminal_cancel).toBeDefined()
+  })
+
+  test("terminal tool handlers return structured not-found errors", async () => {
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async getTerminal() {
+        throw new Error("Unknown terminal id: term_missing")
+      },
+      async readTerminal() {
+        throw new Error("Unknown terminal id: term_missing")
+      },
+      async sendTerminal() {
+        throw new Error("Unknown terminal id: term_missing")
+      },
+      async cancelTerminal() {
+        throw new Error("Unknown terminal id: term_missing")
+      },
+    } as any)
+
+    for (const terminalTool of [tools.mc_terminal_get, tools.mc_terminal_read, tools.mc_terminal_send, tools.mc_terminal_cancel]) {
+      const result = await terminalTool.execute({ terminalId: "term_missing" } as any, {} as any) as any
+      const output = JSON.parse(result.output)
+
+      expect(output).toEqual({
+        ok: false,
+        error: {
+          code: "TerminalNotFound",
+          message: "Unknown terminal id: term_missing",
+          suggestion: "Use mc_terminal_list to find active Mission Control terminal ids before retrying.",
+        },
+      })
+    }
   })
 })

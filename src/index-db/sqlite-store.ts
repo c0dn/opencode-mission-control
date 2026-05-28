@@ -68,6 +68,7 @@ export class SqliteSearchIndexStore {
         built_at INTEGER NOT NULL,
         snapshot_at INTEGER NOT NULL,
         discovery_directory TEXT,
+        discovery_workspace_id TEXT,
         include_tool_outputs_for_indexing INTEGER NOT NULL,
         settings_json TEXT NOT NULL,
         semantic_signature TEXT,
@@ -79,6 +80,7 @@ export class SqliteSearchIndexStore {
         session_id TEXT NOT NULL,
         title TEXT NOT NULL,
         directory TEXT,
+        workspace_id TEXT,
         parent_session_id TEXT,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -175,6 +177,8 @@ export class SqliteSearchIndexStore {
     this.ensureColumn("semantic_vector_meta", "vector_json", "TEXT NOT NULL DEFAULT '[]'")
     this.ensureColumn("semantic_query_cache", "query_key", "TEXT NOT NULL DEFAULT ''")
     this.ensureColumn("semantic_query_cache", "vector_json", "TEXT NOT NULL DEFAULT '[]'")
+    this.ensureColumn("index_state", "discovery_workspace_id", "TEXT")
+    this.ensureColumn("sessions", "workspace_id", "TEXT")
   }
 
   replaceScopedSnapshot(index: SearchIndexDocument) {
@@ -235,6 +239,7 @@ export class SqliteSearchIndexStore {
       discovery: {
         scope,
         directory: state.discovery_directory ?? undefined,
+        workspaceID: state.discovery_workspace_id ?? undefined,
       },
       settings: parseJsonSettings(state.settings_json, Boolean(state.include_tool_outputs_for_indexing)),
       sessions: sessions.map(toSessionRecord),
@@ -425,14 +430,15 @@ export class SqliteSearchIndexStore {
     this.database.prepare(`
       INSERT INTO index_state (
         scope, version, built_at, snapshot_at, discovery_directory,
-        include_tool_outputs_for_indexing, settings_json, semantic_signature, semantic_built_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        discovery_workspace_id, include_tool_outputs_for_indexing, settings_json, semantic_signature, semantic_built_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       index.discovery.scope,
       index.version,
       index.builtAt,
       index.snapshotAt,
       index.discovery.directory ?? null,
+      index.discovery.workspaceID ?? null,
       index.settings.includeToolOutputsForIndexing ? 1 : 0,
       JSON.stringify(index.settings),
       index.semantic?.signature ?? null,
@@ -440,8 +446,8 @@ export class SqliteSearchIndexStore {
     )
 
     const insertSession = this.database.prepare(`
-      INSERT INTO sessions (scope, session_id, title, directory, parent_session_id, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions (scope, session_id, title, directory, workspace_id, parent_session_id, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `)
     for (const session of index.sessions) {
       insertSession.run(
@@ -449,6 +455,7 @@ export class SqliteSearchIndexStore {
         session.sessionID,
         session.title,
         session.directory ?? null,
+        session.workspaceID ?? null,
         session.parentSessionID ?? null,
         session.createdAt,
         session.updatedAt,
@@ -715,6 +722,7 @@ const toSessionRecord = (row: SessionRow): SourceSessionRecord => ({
   sessionID: row.session_id,
   title: row.title,
   directory: row.directory ?? undefined,
+  workspaceID: row.workspace_id ?? undefined,
   parentSessionID: row.parent_session_id ?? undefined,
   createdAt: row.created_at,
   updatedAt: row.updated_at,
@@ -745,6 +753,7 @@ interface IndexStateRow {
   built_at: number
   snapshot_at: number
   discovery_directory: string | null
+  discovery_workspace_id: string | null
   include_tool_outputs_for_indexing: number
   settings_json: string
   semantic_signature: string | null
@@ -755,6 +764,7 @@ interface SessionRow {
   session_id: string
   title: string
   directory: string | null
+  workspace_id: string | null
   parent_session_id: string | null
   created_at: number
   updated_at: number

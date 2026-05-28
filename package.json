@@ -26,8 +26,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "1.14.33",
-    "@opencode-ai/sdk": "1.14.33"
+    "@opencode-ai/plugin": "1.15.10",
+    "@opencode-ai/sdk": "1.15.10"
   },
   "devDependencies": {
     "@types/node": "^25.6.0",

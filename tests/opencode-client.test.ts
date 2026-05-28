@@ -20,6 +20,62 @@ afterEach(async () => {
 
 describe("OpenCodeAdapter session APIs", () => {
 
+  test("injects synthetic notifications with noReply through raw clients", async () => {
+    const calls: unknown[] = []
+    const adapter = new OpenCodeAdapter({
+      _client: {
+        async post(options: unknown) {
+          calls.push(options)
+          return { data: { ok: true }, response: new Response("{}") }
+        },
+      },
+      session: {},
+    })
+
+    expect(await adapter.injectSyntheticText("ses_123", "done")).toEqual({ ok: true })
+    expect(calls).toEqual([
+      {
+        url: "/session/ses_123/message",
+        body: { parts: [{ type: "text", text: "done", synthetic: true }], noReply: true },
+        throwOnError: true,
+      },
+    ])
+  })
+
+  test("injects synthetic notifications with noReply through public and sdk prompt clients", async () => {
+    const publicCalls: unknown[] = []
+    const publicAdapter = new OpenCodeAdapter(
+      { session: {} },
+      {
+        sdkClient: {
+          session: {
+            async prompt(args: unknown) {
+              publicCalls.push(args)
+              return { ok: true }
+            },
+          },
+        },
+      },
+    )
+
+    expect(await publicAdapter.injectSyntheticText("ses_public", "done")).toEqual({ ok: true })
+    expect(publicCalls[0]).toMatchObject({ sessionID: "ses_public", noReply: true })
+
+    const sdkCalls: unknown[] = []
+    const sdkAdapter = new OpenCodeAdapter({
+      session: {
+        async prompt(args: unknown) {
+          sdkCalls.push(args)
+          return { ok: true }
+        },
+      },
+    })
+
+    expect(await sdkAdapter.injectSyntheticText("ses_sdk", "done")).toEqual({ ok: true })
+    expect(sdkCalls[0]).toMatchObject({ path: { id: "ses_sdk" }, noReply: true })
+  })
+
+
   test("uses experimental session listing for unscoped global discovery when an sdk client is available", async () => {
     const calls: Array<{ method: string; args: unknown; options?: unknown }> = []
     const adapter = new OpenCodeAdapter(
@@ -47,7 +103,7 @@ describe("OpenCodeAdapter session APIs", () => {
     expect(calls).toEqual([
       {
         method: "experimental.session.list",
-        args: {},
+        args: { directory: "" },
         options: { responseStyle: "data", throwOnError: true },
       },
     ])
@@ -108,7 +164,7 @@ describe("OpenCodeAdapter session APIs", () => {
     expect(calls).toEqual([
       {
         method: "request",
-        options: { method: "GET", url: "/experimental/session", throwOnError: true },
+        options: { method: "GET", url: "/experimental/session", query: { directory: "" }, throwOnError: true },
       },
     ])
   })

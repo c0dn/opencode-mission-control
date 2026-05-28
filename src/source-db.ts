@@ -4,6 +4,7 @@ import {
   extractSessionID,
   extractSessionTimestamp,
   extractTitle,
+  extractWorkspaceID,
   normalizeMessage,
 } from "./session-extractors.js"
 import type { SessionTranscriptEntry } from "./types.js"
@@ -13,13 +14,14 @@ export interface SourceSessionRecord {
   sessionID: string
   title: string
   directory?: string
+  workspaceID?: string
   parentSessionID?: string
   createdAt: number
   updatedAt: number
 }
 
 export class MissionControlSourceDB {
-  async listSessions(adapter: OpenCodeAdapter, options: { global?: boolean } = {}): Promise<SourceSessionRecord[]> {
+  async listSessions(adapter: OpenCodeAdapter, options: { global?: boolean; workspaceID?: string } = {}): Promise<SourceSessionRecord[]> {
     const sessions = await adapter.listSessions(options)
 
     return sessions.flatMap((session: any) => {
@@ -33,6 +35,7 @@ export class MissionControlSourceDB {
           sessionID,
           title: extractTitle(session) ?? "Untitled session",
           directory: extractDirectory(session) ?? (options.global ? "" : undefined),
+          workspaceID: extractWorkspaceID(session) ?? options.workspaceID,
           parentSessionID: extractParentSessionID(session),
           createdAt: extractSessionTimestamp(session, "created") ?? Date.now(),
           updatedAt: extractSessionTimestamp(session, "updated") ?? Date.now(),
@@ -51,7 +54,7 @@ export class MissionControlSourceDB {
     const entries: SessionTranscriptEntry[] = []
 
     for (const session of sessions) {
-      const messages = await adapter.getSessionMessages(session.sessionID, session.directory)
+      const messages = await adapter.getSessionMessages(session.sessionID, session.directory, session.workspaceID)
       for (const message of messages) {
         const normalized = normalizeMessage(session.sessionID, message, options.includeToolOutputs)
         if (normalized) {

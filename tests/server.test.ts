@@ -19,6 +19,30 @@ afterEach(async () => {
 })
 
 describe("MissionControlServer", () => {
+  test("does not reuse disposed servers from the global context store", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-server-store-"))
+    tempDirs.push(directory)
+    const context = {
+      client: {
+        session: {},
+        app: {
+          async log() {
+            return undefined
+          },
+        },
+      },
+      directory,
+      worktree: directory,
+    }
+
+    const first = await MissionControlServer.fromContext(context, DEFAULT_CONFIG, { search: {} })
+    await first.dispose()
+    const second = await MissionControlServer.fromContext(context, DEFAULT_CONFIG, { search: {} })
+
+    expect(second).not.toBe(first)
+    await second.dispose()
+  })
+
   test("status reports built index metadata after a search", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
     tempDirs.push(directory)
@@ -70,6 +94,41 @@ describe("MissionControlServer", () => {
     expect(status.index.indexedSessionCount).toBe(1)
     expect(status.index.dirtySessionCount).toBe(0)
     expect((status.capabilities as any).jobs).toBeUndefined()
+  })
+
+  test("status reports terminal tools available for legacy inspect-only config", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
+    tempDirs.push(directory)
+
+    const server = new MissionControlServer(
+      {
+        client: {
+          session: {},
+          app: {
+            async log() {
+              return undefined
+            },
+          },
+        },
+        directory,
+        worktree: directory,
+      },
+      {
+        ...DEFAULT_CONFIG,
+        tools: {
+          surface: "inspect-only",
+        },
+      },
+      { search: {} },
+    )
+
+    const status = await server.status()
+
+    expect(status.implemented.terminalTools).toBe(true)
+    expect(status.capabilities.terminals).toEqual({
+      zellij: true,
+      syntheticNotifications: true,
+    })
   })
 
   test("status reports the most recently built scope-specific index", async () => {

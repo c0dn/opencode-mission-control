@@ -96,6 +96,10 @@ export interface MissionControlCapabilityMatrix {
     liveEvents: boolean
     recentBuffer: boolean
   }
+  terminals?: {
+    zellij: boolean
+    syntheticNotifications: boolean
+  }
 }
 
 export interface MissionControlEventRecord {
@@ -110,6 +114,7 @@ export interface RuntimeSessionMetadata {
   parentSessionId?: string
   title?: string
   directory?: string
+  workspaceID?: string
   createdAt?: number
   updatedAt?: number
   observedAt: number
@@ -120,6 +125,7 @@ export interface MissionControlIndexStatus {
   builtAt?: number
   discoveryScope?: SessionDiscoveryScope
   discoveryDirectory?: string
+  discoveryWorkspaceID?: string
   indexedSessionCount?: number
   includeToolOutputsForIndexing: boolean
   semanticSignature?: string
@@ -130,6 +136,7 @@ export interface MissionControlStatus {
   name: string
   startedAt: number
   directory: string
+  workspaceID?: string
   implemented: {
     sessionRead: boolean
     sessionGet: boolean
@@ -137,7 +144,8 @@ export interface MissionControlStatus {
     sessionTail: boolean
       sessionTree: boolean
       sessionObserve: boolean
-      sessionSearch: boolean
+       sessionSearch: boolean
+       terminalTools?: boolean
   }
   config: MissionControlConfig
   counters: {
@@ -146,6 +154,7 @@ export interface MissionControlStatus {
   }
   capabilities: MissionControlCapabilityMatrix
   index: MissionControlIndexStatus
+  recentEvents: MissionControlEventRecord[]
 }
 
 export interface SessionTranscriptPart {
@@ -175,6 +184,7 @@ export interface SessionMetadata {
   sessionId: string
   title: string
   directory?: string
+  workspaceID?: string
   parentSessionId?: string
   createdAt?: number
   updatedAt?: number
@@ -223,6 +233,7 @@ export interface SessionSearchResult {
   indexPath: string
   discoveryScope: SessionDiscoveryScope
   discoveryDirectory?: string
+  discoveryWorkspaceID?: string
   indexedSessionCount: number
   warnings: string[]
   matches: SessionSearchMatch[]
@@ -278,6 +289,7 @@ export interface SessionTreeNode {
   sessionId: string
   title?: string
   parentSessionId?: string
+  workspaceID?: string
   status?: string
   children: SessionTreeNode[]
 }

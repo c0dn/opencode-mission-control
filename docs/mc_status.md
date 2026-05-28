@@ -7,6 +7,7 @@ Returns the current Mission Control runtime summary.
 - confirming the plugin is loaded
 - checking whether search is enabled
 - checking whether semantic retrieval is available
+- checking whether Zellij terminal tools are exposed
 - quick debugging of runtime config and counters
 - seeing which search index snapshot is currently active
 
@@ -23,11 +24,15 @@ The payload currently includes:
 - `name`
 - `startedAt`
 - `directory`
+- `workspaceID` when an ambient workspace was available at server construction
 - `implemented`
 - `config`
 - `counters`
 - `capabilities`
 - `index`
+- `recentEvents` containing the bounded runtime event buffer
+
+`capabilities.terminals` reports Zellij terminal support and best-effort synthetic notification support.
 
 The `index` object includes fields such as:
 
@@ -35,6 +40,7 @@ The `index` object includes fields such as:
 - `builtAt`
 - `discoveryScope`
 - `discoveryDirectory`
+- `discoveryWorkspaceID`
 - `indexedSessionCount`
 - `includeToolOutputsForIndexing`
 - `semanticSignature`

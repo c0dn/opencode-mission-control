@@ -80,8 +80,20 @@ export const unwrap = <T>(value: T | { data: T }): T => {
 
 export const directoryQuery = (directory?: string) => (typeof directory === "string" ? { directory } : undefined)
 
-export const withDirectoryQuery = <T extends UnknownRecord & { query?: UnknownRecord }>(input: T, directory?: string): T => {
-  const query = directoryQuery(directory)
+export const scopeQuery = (directory?: string, workspaceID?: string) => {
+  const query = {
+    ...(typeof directory === "string" ? { directory } : {}),
+    ...(typeof workspaceID === "string" ? { workspace: workspaceID } : {}),
+  }
+  return Object.keys(query).length > 0 ? query : undefined
+}
+
+export const withScopeQuery = <T extends UnknownRecord & { query?: UnknownRecord }>(
+  input: T,
+  directory?: string,
+  workspaceID?: string,
+): T => {
+  const query = scopeQuery(directory, workspaceID)
   if (!query) {
     return input
   }

@@ -10,24 +10,30 @@ export const resolveMissionControlSqliteCachePath = (
   rootDir: string,
   discoveryScope: SessionDiscoveryScope = "current_directory",
   configuredIndexOrCachePath?: string,
+  workspaceKey?: string,
 ) => {
   const configuredPath = configuredIndexOrCachePath?.trim() || undefined
-  const scopedIndexPath = resolveScopedIndexPath(rootDir, configuredPath, discoveryScope)
+  const scopedIndexPath = resolveScopedIndexPath(rootDir, configuredPath, discoveryScope, workspaceKey)
   return sqlitePathFromScopedIndexPath(scopedIndexPath)
 }
 
 export const getMissionControlSqliteCacheRoot = (
   rootDir: string,
   discoveryScope: SessionDiscoveryScope = "current_directory",
+  workspaceKey?: string,
 ) => {
   const xdgCache = process.env.XDG_CACHE_HOME?.trim()
   const home = process.env.HOME?.trim() || homedir()
   const baseDir = xdgCache || (home ? join(home, ".cache") : tmpdir())
-  return join(baseDir, "opencode-mission-control", cachePartition(rootDir, discoveryScope))
+  return join(baseDir, "opencode-mission-control", cachePartition(rootDir, discoveryScope, workspaceKey))
 }
 
-const cachePartition = (rootDir: string, discoveryScope: SessionDiscoveryScope) =>
-  discoveryScope === "global_unscoped" ? "global_unscoped" : scopeKey(rootDir)
+const cachePartition = (rootDir: string, discoveryScope: SessionDiscoveryScope, workspaceKey?: string) => {
+  if (discoveryScope === "global_unscoped") {
+    return workspaceKey ? `global_unscoped.${workspaceKey}` : "global_unscoped"
+  }
+  return scopeKey(workspaceKey ? `${workspaceKey}:${rootDir}` : rootDir)
+}
 
 const scopeKey = (rootDir: string) => createHash("sha1").update(canonicalizeRootDir(rootDir)).digest("hex").slice(0, 16)
 

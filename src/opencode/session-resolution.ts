@@ -1,4 +1,4 @@
-import { extractDirectory, extractSessionID } from "../session-extractors.js"
+import { extractDirectory, extractSessionID, extractWorkspaceID } from "../session-extractors.js"
 
 type UnknownRecord = Record<string, unknown>
 
@@ -12,8 +12,8 @@ export class GlobalSessionDiscoveryError extends Error {
 type DebugFn = (message: string, extra?: UnknownRecord) => Promise<void>
 
 type SessionLookupDeps = {
-  getSession: (sessionID: string, directory?: string) => Promise<any>
-  listSessions: (options?: { global?: boolean; directory?: string }) => Promise<any[]>
+  getSession: (sessionID: string, directory?: string, workspaceID?: string) => Promise<any>
+  listSessions: (options?: { global?: boolean; directory?: string; workspaceID?: string }) => Promise<any[]>
   debug: DebugFn
 }
 
@@ -30,6 +30,7 @@ export const resolveSession = async (deps: Pick<SessionLookupDeps, "getSession" 
     return {
       session,
       directory: typeof session?.directory === "string" ? session.directory : undefined,
+      workspaceID: extractWorkspaceID(session),
     }
   } catch (error) {
     await deps.debug("resolveSession scoped lookup failed", {
@@ -51,14 +52,17 @@ export const resolveSession = async (deps: Pick<SessionLookupDeps, "getSession" 
   }
 
   const directory = extractDirectory(matched) ?? ""
-  const session = await deps.getSession(sessionID, directory)
+  const workspaceID = extractWorkspaceID(matched)
+  const session = await deps.getSession(sessionID, directory, workspaceID)
   await deps.debug("resolveSession recovered session from global listing", {
     sessionId: sessionID,
     directory,
+    workspaceID,
   })
 
   return {
     session,
     directory,
+    workspaceID,
   }
 }

@@ -15,7 +15,7 @@ describe("createMissionControlConfig", () => {
     expect(config.observe.eventBufferSize).toBe(DEFAULT_CONFIG.observe.eventBufferSize)
   })
 
-  test("normalizes legacy orchestration-only surface to full session inspection", () => {
+  test("ignores legacy orchestration-only surface values", () => {
     const config = createMissionControlConfig({
       tools: {
         surface: "jobs" + "-only" as never,
@@ -23,6 +23,11 @@ describe("createMissionControlConfig", () => {
     })
 
     expect(config.tools.surface).toBe("full")
+  })
+
+  test("ignores retired inspect-only tool surface values", () => {
+    expect(createMissionControlConfig({ tools: { surface: "full" } }).tools.surface).toBe("full")
+    expect(createMissionControlConfig({ tools: { surface: "inspect-only" } }).tools.surface).toBe("full")
   })
 
   test("merges debug logging overrides without enabling them by default", () => {

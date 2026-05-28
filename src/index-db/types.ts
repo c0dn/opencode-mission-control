@@ -8,6 +8,7 @@ export interface SearchIndexDocument {
   discovery: {
     scope: SessionDiscoveryScope
     directory?: string
+    workspaceID?: string
   }
   settings: {
     includeToolOutputsForIndexing: boolean

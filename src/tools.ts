@@ -2,10 +2,11 @@ import { tool } from "@opencode-ai/plugin"
 import type { ToolResult as PluginToolResult } from "@opencode-ai/plugin"
 
 import { clampResultLimit } from "./config.js"
+import { TerminalNotFoundError } from "./terminals/registry.js"
 import type { MissionControlServer } from "./server.js"
-import type { MissionControlToolSurface } from "./types.js"
 
-const toPluginToolResult = (value: unknown): PluginToolResult => ({
+const toPluginToolResult = (value: unknown, title: string): PluginToolResult => ({
+  title,
   output: JSON.stringify(value, null, 2),
   metadata: value && typeof value === "object" ? (value as Record<string, unknown>) : { value },
 })
@@ -16,7 +17,7 @@ export const createMissionControlTools = (server: MissionControlServer) => {
     description: "Return mission-control runtime status",
     args: {},
     async execute() {
-      return toPluginToolResult(await server.status())
+      return toPluginToolResult(await server.status(), "Mission Control Status")
     },
   }),
 
@@ -26,7 +27,7 @@ export const createMissionControlTools = (server: MissionControlServer) => {
       sessionId: tool.schema.string(),
     },
     async execute(args) {
-      return toPluginToolResult(await server.getSession(args.sessionId))
+      return toPluginToolResult(await server.getSession(args.sessionId), "Session Metadata")
     },
   }),
 
@@ -44,6 +45,7 @@ export const createMissionControlTools = (server: MissionControlServer) => {
           scope: args.scope,
           limit: clampResultLimit(args.limit, server.config),
         }),
+        "Session Candidates",
       )
     },
   }),
@@ -67,6 +69,7 @@ export const createMissionControlTools = (server: MissionControlServer) => {
           withChildren: args.withChildren,
           withToolOutputs: args.withToolOutputs,
         }),
+        "Session Transcript",
       )
     },
   }),
@@ -86,6 +89,7 @@ export const createMissionControlTools = (server: MissionControlServer) => {
           limit: clampResultLimit(args.limit, server.config),
           withChildren: args.withChildren,
         }),
+        "Session Tail",
       )
     },
   }),
@@ -97,7 +101,7 @@ export const createMissionControlTools = (server: MissionControlServer) => {
       depth: tool.schema.number().optional(),
     },
     async execute(args) {
-      return toPluginToolResult(await server.sessionTree(args.sessionId, args.depth ?? 1))
+      return toPluginToolResult(await server.sessionTree(args.sessionId, args.depth ?? 1), "Session Tree")
     },
   }),
 
@@ -114,6 +118,7 @@ export const createMissionControlTools = (server: MissionControlServer) => {
           withChildren: args.withChildren,
           limit: args.limit,
         }),
+        "Session Events",
       )
     },
   }),
@@ -134,29 +139,140 @@ export const createMissionControlTools = (server: MissionControlServer) => {
           exact: args.exact,
           limit: clampResultLimit(args.limit, server.config),
         }),
+        "Session Search Results",
+      )
+    },
+  }),
+
+  mc_terminal_start: tool({
+    description: "Create/reuse a Zellij background session for an owning OpenCode session and run a command in a pane",
+    args: {
+      sessionId: tool.schema.string(),
+      command: tool.schema.array(tool.schema.string()).optional(),
+      commandString: tool.schema.string().optional(),
+      cwd: tool.schema.string().optional(),
+      title: tool.schema.string().optional(),
+      label: tool.schema.string().optional(),
+      floating: tool.schema.boolean().optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(
+        await server.startTerminal({
+          sessionId: args.sessionId,
+          command: args.command,
+          commandString: args.commandString,
+          cwd: args.cwd,
+          title: args.title,
+          label: args.label,
+          floating: args.floating,
+        }),
+        "Terminal Started",
+      )
+    },
+  }),
+
+  mc_terminal_list: tool({
+    description: "List plugin-known Zellij terminals, optionally filtered by owner session or status",
+    args: {
+      sessionId: tool.schema.string().optional(),
+      status: tool.schema.enum(["running", "completed", "cancelled", "error"]).optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(await server.listTerminals(args), "Terminal List")
+    },
+  }),
+
+  mc_terminal_get: tool({
+    description: "Inspect one Zellij terminal and return a small output preview",
+    args: {
+      terminalId: tool.schema.string(),
+    },
+    async execute(args) {
+      return toPluginToolResult(
+        await terminalToolResult(args.terminalId, () => server.getTerminal(args.terminalId)),
+        "Terminal",
+      )
+    },
+  }),
+
+  mc_terminal_read: tool({
+    description: "Read a Zellij terminal scrollback with offset/limit paging",
+    args: {
+      terminalId: tool.schema.string(),
+      offset: tool.schema.number().optional(),
+      limit: tool.schema.number().optional(),
+      ansi: tool.schema.boolean().optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(
+        await terminalToolResult(args.terminalId, () => server.readTerminal(args.terminalId, {
+          offset: args.offset,
+          limit: clampResultLimit(args.limit, server.config),
+          ansi: args.ansi,
+        })),
+        "Terminal Scrollback",
+      )
+    },
+  }),
+
+  mc_terminal_send: tool({
+    description: "Send text and/or key chords to a Zellij terminal pane",
+    args: {
+      terminalId: tool.schema.string(),
+      text: tool.schema.string().optional(),
+      keys: tool.schema.array(tool.schema.string()).optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(
+        await terminalToolResult(args.terminalId, () => server.sendTerminal(args.terminalId, {
+          text: args.text,
+          keys: args.keys,
+        })),
+        "Terminal Input Sent",
+      )
+    },
+  }),
+
+  mc_terminal_cancel: tool({
+    description: "Cancel a Zellij terminal by sending Ctrl-C; optionally close the pane with closePane true",
+    args: {
+      terminalId: tool.schema.string(),
+      ctrlC: tool.schema.boolean().optional(),
+      closePane: tool.schema.boolean().optional(),
+    },
+    async execute(args) {
+      return toPluginToolResult(
+        await terminalToolResult(args.terminalId, () => server.cancelTerminal(args.terminalId, {
+          ctrlC: args.ctrlC,
+          closePane: args.closePane,
+        })),
+        "Terminal Cancelled",
       )
     },
   }),
   }
 
-  return selectToolsForSurface(tools, server.config.tools.surface)
+  return tools
 }
 
-const selectToolsForSurface = <T extends Record<string, unknown>>(tools: T, surface: MissionControlToolSurface): T => {
-  if (surface === "full") {
-    return tools
+const terminalToolResult = async (terminalId: string, action: () => Promise<unknown>) => {
+  try {
+    return await action()
+  } catch (error) {
+    if (isTerminalNotFound(error)) {
+      return {
+        ok: false,
+        error: {
+          code: "TerminalNotFound",
+          message: `Unknown terminal id: ${terminalId}`,
+          suggestion: "Use mc_terminal_list to find active Mission Control terminal ids before retrying.",
+        },
+      }
+    }
+    throw error
   }
-
-  const allowed = new Set([
-    "mc_status",
-    "mc_session_get",
-    "mc_session_find",
-    "mc_session_read",
-    "mc_session_tail",
-    "mc_session_tree",
-    "mc_session_events",
-    "mc_session_search",
-  ])
-
-  return Object.fromEntries(Object.entries(tools).filter(([toolName]) => allowed.has(toolName))) as T
 }
+
+const isTerminalNotFound = (error: unknown) =>
+  error instanceof TerminalNotFoundError ||
+  (error instanceof Error && (error.name === "TerminalNotFoundError" || error.message.startsWith("Unknown terminal id:")))

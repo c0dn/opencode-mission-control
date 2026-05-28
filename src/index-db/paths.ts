@@ -10,50 +10,63 @@ export const resolveScopedIndexPath = (
   rootDir: string,
   configuredIndexPath: string | undefined,
   discoveryScope: SessionDiscoveryScope,
+  workspaceKey?: string,
 ) => {
   if (configuredIndexPath) {
-    return resolveConfiguredScopedIndexPath(configuredIndexPath, discoveryScope)
+    return resolveConfiguredScopedIndexPath(configuredIndexPath, discoveryScope, workspaceKey)
   }
 
-  return join(getMissionControlCacheRoot(rootDir, discoveryScope), `search-index.${discoveryScope}.json`)
+  return join(getMissionControlCacheRoot(rootDir, discoveryScope, workspaceKey), `search-index.${discoveryScope}.json`)
 }
 
 export const resolveDirtyStorePath = (
   rootDir: string,
   configuredIndexPath: string | undefined,
   scope: SessionDiscoveryScope,
+  workspaceKey?: string,
 ) => {
   if (!configuredIndexPath) {
-    return join(getMissionControlCacheRoot(rootDir, scope), `search-dirty.${scope}.json`)
+    return join(getMissionControlCacheRoot(rootDir, scope, workspaceKey), `search-dirty.${scope}.json`)
   }
 
-  return addScopedDirtySuffix(stripConfiguredScopeSuffix(configuredIndexPath), scope)
+  return addScopedDirtySuffix(addWorkspaceSuffix(stripConfiguredScopeSuffix(configuredIndexPath), workspaceKey), scope)
 }
 
-const getMissionControlCacheRoot = (rootDir: string, scope: SessionDiscoveryScope = "current_directory") => {
+const getMissionControlCacheRoot = (rootDir: string, scope: SessionDiscoveryScope = "current_directory", workspaceKey?: string) => {
   const xdgCache = process.env.XDG_CACHE_HOME?.trim()
   const home = process.env.HOME?.trim() || homedir()
   const baseDir = xdgCache || (home ? join(home, ".cache") : tmpdir())
-  return join(baseDir, "opencode-mission-control", cachePartition(rootDir, scope))
+  return join(baseDir, "opencode-mission-control", cachePartition(rootDir, scope, workspaceKey))
 }
 
 const scopeKey = (rootDir: string) => createHash("sha1").update(rootDir || "default").digest("hex").slice(0, 16)
 
-const cachePartition = (rootDir: string, scope: SessionDiscoveryScope) =>
-  scope === "global_unscoped" ? "global_unscoped" : scopeKey(rootDir)
+const cachePartition = (rootDir: string, scope: SessionDiscoveryScope, workspaceKey?: string) => {
+  if (scope === "global_unscoped") {
+    return workspaceKey ? `global_unscoped.${workspaceKey}` : "global_unscoped"
+  }
+  return scopeKey(workspaceKey ? `${workspaceKey}:${rootDir}` : rootDir)
+}
 
-const resolveConfiguredScopedIndexPath = (filePath: string, scope: SessionDiscoveryScope) => {
-  const normalizedExistingScope = getConfiguredScopeSuffix(filePath)
+const resolveConfiguredScopedIndexPath = (filePath: string, scope: SessionDiscoveryScope, workspaceKey?: string) => {
+  if (!workspaceKey) {
+    const normalizedExistingScope = getConfiguredScopeSuffix(filePath)
 
-  if (!normalizedExistingScope) {
-    return scope === "current_directory" ? filePath : addScopeSuffix(filePath, scope)
+    if (!normalizedExistingScope) {
+      return scope === "current_directory" ? filePath : addScopeSuffix(filePath, scope)
+    }
+
+    if (normalizedExistingScope === scope) {
+      return filePath
+    }
+
+    return replaceScopeSuffix(filePath, normalizedExistingScope, scope)
   }
 
-  if (normalizedExistingScope === scope) {
-    return filePath
-  }
+  const strippedScopePath = stripConfiguredScopeSuffix(filePath)
+  const workspacePath = addWorkspaceSuffix(strippedScopePath, workspaceKey)
 
-  return replaceScopeSuffix(filePath, normalizedExistingScope, scope)
+  return scope === "current_directory" ? workspacePath : addScopeSuffix(workspacePath, scope)
 }
 
 const addScopeSuffix = (filePath: string, scope: SessionDiscoveryScope) => {
@@ -120,4 +133,16 @@ const addScopedDirtySuffix = (filePath: string, scope: SessionDiscoveryScope) =>
 
   const baseName = basename(filePath, extension)
   return join(dirname(filePath), `${baseName}.dirty.${scope}${extension}`)
+}
+
+const addWorkspaceSuffix = (filePath: string, workspaceKey?: string) => {
+  if (!workspaceKey) {
+    return filePath
+  }
+  const extension = extname(filePath)
+  if (!extension) {
+    return `${filePath}.workspace-${workspaceKey}`
+  }
+  const baseName = basename(filePath, extension)
+  return join(dirname(filePath), `${baseName}.workspace-${workspaceKey}${extension}`)
 }

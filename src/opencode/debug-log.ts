@@ -13,6 +13,7 @@ export type OpenCodeAdapterOptions = {
   debug?: MissionControlConfig["debug"]
   serverUrl?: URL | string
   sdkClient?: unknown
+  workspaceID?: string
 }
 
 export class DebugLogWriter {

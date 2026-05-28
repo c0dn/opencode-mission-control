@@ -91,6 +91,39 @@ export const extractDirectory = (value: unknown): string | undefined => {
   return extractStringCandidate(value, ["directory"])
 }
 
+export const extractWorkspaceID = (value: unknown): string | undefined => {
+  if (!value || typeof value !== "object") {
+    return undefined
+  }
+
+  const record = value as Record<string, unknown>
+  for (const candidate of [record.workspaceID, record.workspaceId]) {
+    if (typeof candidate === "string" && candidate.trim()) {
+      return candidate
+    }
+  }
+
+  const workspace = record.workspace
+  if (typeof workspace === "string" && workspace.trim()) {
+    return workspace
+  }
+  if (workspace && typeof workspace === "object") {
+    const id = (workspace as Record<string, unknown>).id
+    if (typeof id === "string" && id.trim()) {
+      return id
+    }
+  }
+
+  for (const nested of [record.properties, record.info, record.session, record.project]) {
+    const candidate = extractWorkspaceID(nested)
+    if (candidate) {
+      return candidate
+    }
+  }
+
+  return undefined
+}
+
 export const extractRequestID = (value: unknown): string | undefined => {
   return extractStringCandidate(value, ["requestID", "requestId", "id"])
 }

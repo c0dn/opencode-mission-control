@@ -5,6 +5,7 @@ import {
   extractSessionTimestamp,
   extractStatus,
   extractTitle,
+  extractWorkspaceID,
   hasParentSessionReference,
 } from "./session-extractors.js"
 import type { MissionControlEventRecord, RuntimeSessionMetadata } from "./types.js"
@@ -42,6 +43,12 @@ export class MissionControlRuntimeState {
     }
 
     if (!record.sessionId) {
+      return
+    }
+
+    if (type === "session.deleted") {
+      this.deleteSession(record.sessionId)
+      this.dirtySessions.set(record.sessionId, Math.max((this.dirtySessions.get(record.sessionId) ?? 0) + 1, record.at))
       return
     }
 
@@ -85,6 +92,16 @@ export class MissionControlRuntimeState {
         if (status) {
         this.sessionStatuses.set(record.sessionId, status)
       }
+      return
+    }
+
+    if (type === "session.next.step.failed" || type === "session.next.tool.failed") {
+      this.sessionStatuses.set(record.sessionId, "error")
+      return
+    }
+
+    if (type.startsWith("session.next.")) {
+      this.sessionStatuses.set(record.sessionId, "running")
     }
   }
 
@@ -139,6 +156,11 @@ export class MissionControlRuntimeState {
       .filter((event) => event.sessionId && scopedIDs.has(event.sessionId))
       .slice(-boundedLimit)
       .reverse()
+  }
+
+  recentEventsGlobal(limit?: number) {
+    const boundedLimit = Math.max(1, Math.trunc(limit ?? this.bufferSize))
+    return this.recentEvents.slice(-boundedLimit).reverse()
   }
 
   private normalizeEvent(type: string, payload: unknown): MissionControlEventRecord {
@@ -211,6 +233,7 @@ export class MissionControlRuntimeState {
       parentSessionId,
       title: extractTitle(payload) ?? previous?.title,
       directory: extractDirectory(payload) ?? previous?.directory,
+      workspaceID: extractWorkspaceID(payload) ?? previous?.workspaceID,
       createdAt,
       updatedAt,
       observedAt: Date.now(),
@@ -220,6 +243,7 @@ export class MissionControlRuntimeState {
       !next.parentSessionId &&
       !next.title &&
       !next.directory &&
+      !next.workspaceID &&
       next.createdAt === undefined &&
       next.updatedAt === undefined
     ) {
@@ -242,6 +266,18 @@ export class MissionControlRuntimeState {
 
     this.sessionMetadata.set(sessionId, next)
   }
+
+  private deleteSession(sessionId: string) {
+    this.sessionStatuses.delete(sessionId)
+    this.sessionMetadata.delete(sessionId)
+    for (const [parentID, children] of this.childSessionIDsByParent.entries()) {
+      children.delete(sessionId)
+      if (children.size === 0) {
+        this.childSessionIDsByParent.delete(parentID)
+      }
+    }
+    this.childSessionIDsByParent.delete(sessionId)
+  }
 }
 
 const shouldMarkSessionDirty = (type: string) =>
@@ -249,6 +285,7 @@ const shouldMarkSessionDirty = (type: string) =>
     "session.created",
     "session.updated",
     "session.compacted",
+    "session.deleted",
     "message.updated",
     "message.removed",
     "message.part.updated",

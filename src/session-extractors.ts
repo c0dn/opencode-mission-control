@@ -6,6 +6,7 @@ export {
   extractSessionTimestamp,
   extractStatus,
   extractTitle,
+  extractWorkspaceID,
   hasParentSessionReference,
 } from "./session-extractors/core.js"
 export { extractTailText, hasVisibleTranscriptContent, normalizeMessage } from "./session-extractors/transcript.js"

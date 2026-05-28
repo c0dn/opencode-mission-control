@@ -48,6 +48,7 @@ mc_session_search({
 - Results include metadata such as:
   - `effectiveMode`
   - `discoveryScope`
+  - `discoveryWorkspaceID` when indexed from an ambient workspace
   - `indexedSessionCount`
   - `indexPath`
 - Each match includes `matchType`, so callers can distinguish an exact lexical hit from a ranked candidate.
@@ -83,6 +84,8 @@ By default, the search cache is stored under:
 ```
 
 Current-directory and global discovery use separate cache files so they do not overwrite each other’s session snapshots, FTS data, or semantic vectors.
+
+When an ambient workspace ID is present, Mission Control also partitions the cache by workspace key. Configured SQLite paths receive a `.workspace-<key>` suffix before any global scope suffix.
 
 ## Caveats
 

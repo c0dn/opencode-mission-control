@@ -9,6 +9,7 @@ import {
   extractSessionTimestamp,
   extractStatus,
   extractTitle,
+  extractWorkspaceID,
   normalizeMessage,
 } from "./session-extractors.js"
 import { MissionControlSourceDB, type SourceSessionRecord } from "./source-db.js"
@@ -37,7 +38,7 @@ export class MissionControlSessionService {
     try {
       const resolved = await adapter.resolveSession(sessionId)
       return ok({
-        session: this.normalizeSessionMetadata(sessionId, resolved.session, resolved.directory),
+        session: this.normalizeSessionMetadata(sessionId, resolved.session, resolved.directory, resolved.workspaceID),
       })
     } catch {
       await adapter.debug("getSession failed to resolve session", { sessionId })
@@ -299,7 +300,7 @@ export class MissionControlSessionService {
   private async loadRecentMessageRecordPage(
     adapter: OpenCodeAdapter,
     sessionId: string,
-    relatedSessions: Array<{ sessionID: string; directory?: string }>,
+    relatedSessions: Array<{ sessionID: string; directory?: string; workspaceID?: string }>,
     options: {
       offset?: number
       limit: number
@@ -323,6 +324,7 @@ export class MissionControlSessionService {
     const states: PagedSessionState[] = relatedSessions.map((relatedSession, sessionOrder) => ({
       sessionID: relatedSession.sessionID,
       directory: relatedSession.directory,
+      workspaceID: relatedSession.workspaceID,
       sessionOrder,
       eligibleRecords: [],
       nextEligibleIndex: 0,
@@ -459,7 +461,7 @@ export class MissionControlSessionService {
 
     if (options.withChildren) {
       try {
-        const children = await adapter.getSessionChildren(sessionId, sessionDirectory)
+        const children = await adapter.getSessionChildren(sessionId, sessionDirectory, extractWorkspaceID(session))
         childSummaries = children.map((child) => {
           const childID = extractSessionID(child) ?? "unknown"
           const cachedMetadata = this.state.metadataForSession(childID)
@@ -495,13 +497,14 @@ export class MissionControlSessionService {
     })
   }
 
-  private normalizeSessionMetadata(sessionId: string, session: unknown, directory?: string): SessionMetadata {
+  private normalizeSessionMetadata(sessionId: string, session: unknown, directory?: string, workspaceID?: string): SessionMetadata {
     const cachedMetadata = this.state.metadataForSession(sessionId)
 
     return {
       sessionId,
       title: extractTitle(session) ?? cachedMetadata?.title ?? "Untitled session",
       directory: extractDirectory(session) ?? cachedMetadata?.directory ?? directory,
+      workspaceID: extractWorkspaceID(session) ?? cachedMetadata?.workspaceID ?? workspaceID,
       parentSessionId: extractParentSessionID(session) ?? cachedMetadata?.parentSessionId,
       createdAt: extractSessionTimestamp(session, "created") ?? cachedMetadata?.createdAt,
       updatedAt: extractSessionTimestamp(session, "updated") ?? cachedMetadata?.updatedAt,
@@ -516,6 +519,7 @@ export class MissionControlSessionService {
       sessionId: session.sessionID,
       title: session.title,
       directory: session.directory || cachedMetadata?.directory || undefined,
+      workspaceID: session.workspaceID ?? cachedMetadata?.workspaceID,
       parentSessionId: session.parentSessionID ?? cachedMetadata?.parentSessionId,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
@@ -537,6 +541,7 @@ export class MissionControlSessionService {
       sessionId,
       title: extractTitle(session) ?? cachedMetadata?.title,
       parentSessionId: extractParentSessionID(session) ?? cachedMetadata?.parentSessionId,
+      workspaceID: extractWorkspaceID(session) ?? cachedMetadata?.workspaceID,
       status: this.state.statusForSession(sessionId, extractStatus(session)),
       children: [],
     }
@@ -545,7 +550,7 @@ export class MissionControlSessionService {
       return node
     }
 
-    const children = await adapter.getSessionChildren(sessionId, sessionDirectory)
+    const children = await adapter.getSessionChildren(sessionId, sessionDirectory, extractWorkspaceID(session) ?? cachedMetadata?.workspaceID)
     for (const child of children) {
       const childID = extractSessionID(child)
       if (!childID) {
@@ -578,14 +583,15 @@ export class MissionControlSessionService {
       includeLimit?: number
       includeToolOutputs?: boolean
     },
-  ): Promise<ToolResult<Array<{ sessionID: string; directory?: string }>>> {
-    const relatedSessions: Array<{ sessionID: string; directory?: string }> = []
+  ): Promise<ToolResult<Array<{ sessionID: string; directory?: string; workspaceID?: string }>>> {
+    const relatedSessions: Array<{ sessionID: string; directory?: string; workspaceID?: string }> = []
 
     try {
       const resolved = await adapter.resolveSession(sessionId)
       relatedSessions.push({
         sessionID: sessionId,
         directory: resolved.directory ?? extractDirectory(resolved.session),
+        workspaceID: resolved.workspaceID ?? extractWorkspaceID(resolved.session),
       })
     } catch {
       await adapter.debug(`${debugContext.action} failed to resolve session`, {
@@ -605,7 +611,7 @@ export class MissionControlSessionService {
 
     try {
       const parentDirectory = relatedSessions[0]?.directory
-      const children = await adapter.getSessionChildren(sessionId, parentDirectory)
+      const children = await adapter.getSessionChildren(sessionId, parentDirectory, relatedSessions[0]?.workspaceID)
       for (const child of children) {
         const childID = extractSessionID(child)
         if (childID) {
@@ -613,6 +619,7 @@ export class MissionControlSessionService {
           relatedSessions.push({
             sessionID: childID,
             directory: extractDirectory(child) ?? cachedMetadata?.directory ?? parentDirectory,
+            workspaceID: extractWorkspaceID(child) ?? cachedMetadata?.workspaceID ?? relatedSessions[0]?.workspaceID,
           })
         }
       }
@@ -635,13 +642,13 @@ export class MissionControlSessionService {
   private async loadMessageGroups(
     adapter: OpenCodeAdapter,
     sessionId: string,
-    relatedSessions: Array<{ sessionID: string; directory?: string }>,
+    relatedSessions: Array<{ sessionID: string; directory?: string; workspaceID?: string }>,
   ): Promise<ToolResult<SessionMessageGroup[]>> {
     const groups: SessionMessageGroup[] = []
 
     for (const [sessionOrder, relatedSession] of relatedSessions.entries()) {
       try {
-        const sessionMessages = await adapter.getSessionMessages(relatedSession.sessionID, relatedSession.directory)
+        const sessionMessages = await adapter.getSessionMessages(relatedSession.sessionID, relatedSession.directory, relatedSession.workspaceID)
         const records = sessionMessages
           .map((message, messageOrder) => ({
             sessionID: relatedSession.sessionID,
@@ -694,6 +701,7 @@ interface SessionMessageGroup {
 interface PagedSessionState {
   sessionID: string
   directory?: string
+  workspaceID?: string
   sessionOrder: number
   eligibleRecords: SessionMessageRecord[]
   nextEligibleIndex: number
@@ -766,6 +774,7 @@ const loadNextPagedSessionChunk = async (
   try {
     const page = await adapter.getSessionMessagePage(state.sessionID, {
       directory: state.directory,
+      workspaceID: state.workspaceID,
       limit: pageSize,
       before: state.nextCursor,
     })

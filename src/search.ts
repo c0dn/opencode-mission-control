@@ -41,16 +41,19 @@ export class MissionControlSearchService {
     rootDir: string,
     args: SearchExecutionArgs,
     semanticProvider?: SemanticEmbeddingProvider,
+    workspaceID?: string,
+    workspaceKey?: string,
   ): Promise<ToolResult<SessionSearchResult>> {
     const useGlobalScope = args.scope === "global"
     const discovery: SearchIndexDocument["discovery"] = {
       scope: useGlobalScope ? "global_unscoped" : "current_directory",
       directory: useGlobalScope ? undefined : rootDir,
+      workspaceID,
     }
 
     let sessions
     try {
-      sessions = await this.sourceDB.listSessions(adapter, { global: useGlobalScope })
+      sessions = await this.sourceDB.listSessions(adapter, { global: useGlobalScope, workspaceID })
     } catch (error) {
       if (error instanceof GlobalSessionDiscoveryError) {
         return fail(
@@ -70,6 +73,7 @@ export class MissionControlSearchService {
     const indexDB = new MissionControlIndexDB(rootDir, config.search.indexPath, discovery.scope, {
       vectorExtensionPaths: config.search.vectorExtensionPaths,
       vectorBackend: config.search.vectorBackend,
+      workspaceKey,
     })
     const existing = await indexDB.load()
     const indexSettings = {
@@ -144,6 +148,7 @@ export class MissionControlSearchService {
         indexPath: indexDB.getIndexPath(),
         discoveryScope: index.discovery.scope,
         discoveryDirectory: index.discovery.directory,
+        discoveryWorkspaceID: index.discovery.workspaceID,
         indexedSessionCount: index.sessions.length,
         warnings,
         matches,
@@ -162,6 +167,7 @@ export class MissionControlSearchService {
         indexPath: indexDB.getIndexPath(),
         discoveryScope: index.discovery.scope,
         discoveryDirectory: index.discovery.directory,
+        discoveryWorkspaceID: index.discovery.workspaceID,
         indexedSessionCount: index.sessions.length,
         warnings,
         matches,
@@ -221,6 +227,7 @@ export class MissionControlSearchService {
         indexPath: indexDB.getIndexPath(),
         discoveryScope: queryEmbedding.index.discovery.scope,
         discoveryDirectory: queryEmbedding.index.discovery.directory,
+        discoveryWorkspaceID: queryEmbedding.index.discovery.workspaceID,
         indexedSessionCount: queryEmbedding.index.sessions.length,
         warnings,
         matches: limitedMatches,
@@ -248,6 +255,7 @@ export class MissionControlSearchService {
         indexPath: indexDB.getIndexPath(),
         discoveryScope: index.discovery.scope,
         discoveryDirectory: index.discovery.directory,
+        discoveryWorkspaceID: index.discovery.workspaceID,
         indexedSessionCount: index.sessions.length,
         warnings,
         matches,
@@ -369,6 +377,7 @@ export class MissionControlSearchService {
     return (
       existing.discovery.scope === discovery.scope &&
       existing.discovery.directory === discovery.directory &&
+      existing.discovery.workspaceID === discovery.workspaceID &&
       existing.settings.includeToolOutputsForIndexing === settings.includeToolOutputsForIndexing &&
       Array.isArray(existing.cursors)
     )

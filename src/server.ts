@@ -1,11 +1,15 @@
+import { createHash } from "node:crypto"
+
 import { MissionControlIndexDB } from "./index-db.js"
 import { OpenCodeAdapter } from "./opencode-client.js"
 import { MissionControlRuntimeState } from "./runtime-state.js"
 import { MissionControlSearchService } from "./search.js"
 import { createSemanticProvider } from "./semantic-provider.js"
-import { extractSessionID } from "./session-extractors.js"
+import { extractSessionID, extractWorkspaceID } from "./session-extractors.js"
 import { MissionControlSessionService } from "./session-service.js"
 import { MissionControlSourceDB } from "./source-db.js"
+import { MissionControlTerminalRegistry, type TerminalStatus } from "./terminals/registry.js"
+import { ZellijAdapter } from "./terminals/zellij.js"
 import type {
   MissionControlCapabilityMatrix,
   MissionControlConfig,
@@ -19,6 +23,10 @@ type PluginContext = {
   directory?: string
   worktree?: string
   serverUrl?: URL
+  workspaceID?: string
+  workspaceId?: string
+  workspace?: string | { id?: string }
+  project?: { workspaceID?: string; workspaceId?: string; workspace?: string | { id?: string } }
 }
 
 const SERVER_STORE_KEY = "__opencodeMissionControlServerStore__"
@@ -44,10 +52,17 @@ export class MissionControlServer {
   private readonly sourceDB: MissionControlSourceDB
   private readonly searchService: MissionControlSearchService
   private readonly sessionService: MissionControlSessionService
+  private terminalRegistry: MissionControlTerminalRegistry
+  private readonly workspaceID?: string
+  private readonly workspaceKey?: string
+  private storeKey?: string
   private started = false
+  private disposed = false
 
   constructor(context: PluginContext, config: MissionControlConfig, secrets: MissionControlRuntimeSecrets) {
     const rootDir = context.directory ?? context.worktree ?? "."
+    this.workspaceID = resolveAmbientWorkspaceID(context)
+    this.workspaceKey = this.workspaceID ? createWorkspaceKey(this.workspaceID) : undefined
 
     this.context = context
     this.config = config
@@ -57,25 +72,34 @@ export class MissionControlServer {
       directory: context.directory,
       debug: config.debug,
       serverUrl: context.serverUrl,
+      workspaceID: this.workspaceID,
     })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState = new MissionControlRuntimeState(config.observe.eventBufferSize)
     this.sourceDB = new MissionControlSourceDB()
     this.searchService = new MissionControlSearchService(this.sourceDB, this.runtimeState)
     this.sessionService = new MissionControlSessionService(this.runtimeState, this.sourceDB)
+    this.terminalRegistry = new MissionControlTerminalRegistry(new ZellijAdapter(), this.adapter)
   }
 
   static async fromContext(context: PluginContext, config: MissionControlConfig, secrets: MissionControlRuntimeSecrets) {
-    const key = context.directory ?? context.worktree ?? "default"
+    const workspaceID = resolveAmbientWorkspaceID(context)
+    const workspaceKey = workspaceID ? createWorkspaceKey(workspaceID) : undefined
+    const key = workspaceKey ? `${workspaceKey}:${context.directory ?? context.worktree ?? "default"}` : context.directory ?? context.worktree ?? "default"
     const store = getServerStore()
     const existing = store.get(key)
 
     if (existing) {
-      existing.rebind(context, config, secrets)
-      return existing
+      if (existing.disposed) {
+        store.delete(key)
+      } else {
+        existing.rebind(context, config, secrets)
+        return existing
+      }
     }
 
     const created = new MissionControlServer(context, config, secrets)
+    created.storeKey = key
     store.set(key, created)
 
     try {
@@ -98,9 +122,16 @@ export class MissionControlServer {
       directory: context.directory,
       debug: config.debug,
       serverUrl: context.serverUrl,
+      workspaceID: this.workspaceID,
     })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState.setBufferSize(config.observe.eventBufferSize)
+    if (this.disposed) {
+      this.terminalRegistry = new MissionControlTerminalRegistry(new ZellijAdapter(), this.adapter)
+      this.disposed = false
+    } else {
+      this.terminalRegistry.setOpenCodeAdapter(this.adapter)
+    }
   }
 
   async start() {
@@ -114,16 +145,27 @@ export class MissionControlServer {
     await adapter.debug("Mission Control server started", {
       directory: this.context.directory,
       worktree: this.context.worktree,
+      workspaceID: this.workspaceID,
       debugFileEnabled: this.config.debug.enabled,
     })
     await adapter.log("info", "Mission Control plugin initialized", {
       directory: this.context.directory,
       worktree: this.context.worktree,
+      workspaceID: this.workspaceID,
     })
+  }
+
+  async dispose() {
+    this.disposed = true
+    this.terminalRegistry.dispose()
+    if (this.storeKey && getServerStore().get(this.storeKey) === this) {
+      getServerStore().delete(this.storeKey)
+    }
   }
 
   capabilities(): MissionControlCapabilityMatrix {
     const exposesSessionTools = true
+    const exposesTerminalTools = true
 
     return {
       search: {
@@ -139,16 +181,20 @@ export class MissionControlServer {
         liveEvents: exposesSessionTools,
         recentBuffer: exposesSessionTools,
       },
+      terminals: {
+        zellij: exposesTerminalTools,
+        syntheticNotifications: exposesTerminalTools,
+      },
     }
   }
 
   async status(): Promise<MissionControlStatus> {
     const rootDir = this.context.directory ?? this.context.worktree ?? "."
-    const indexDB = new MissionControlIndexDB(rootDir, this.config.search.indexPath)
+    const indexDB = new MissionControlIndexDB(rootDir, this.config.search.indexPath, undefined, { workspaceKey: this.workspaceKey })
     const index = await indexDB.load()
     const indexStatus = await indexDB.readStatus()
     const persistedDirtySessionIDs = index
-      ? await new MissionControlIndexDB(rootDir, this.config.search.indexPath, index.discovery.scope).readDirtySessionIDs(
+        ? await new MissionControlIndexDB(rootDir, this.config.search.indexPath, index.discovery.scope, { workspaceKey: this.workspaceKey }).readDirtySessionIDs(
           index.sessions.map((session) => session.sessionID),
         )
       : []
@@ -157,6 +203,7 @@ export class MissionControlServer {
       name: "opencode-mission-control",
       startedAt: this.startedAt,
       directory: rootDir,
+      workspaceID: this.workspaceID,
       implemented: {
         sessionGet: true,
         sessionFind: true,
@@ -164,7 +211,8 @@ export class MissionControlServer {
         sessionTail: true,
         sessionTree: true,
         sessionObserve: true,
-        sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
+          sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
+          terminalTools: true,
       },
       config: this.config,
       counters: this.runtimeState.counters(),
@@ -182,6 +230,7 @@ export class MissionControlServer {
             ]).size
           : 0,
       },
+      recentEvents: this.runtimeState.recentEventsGlobal(this.config.observe.eventBufferSize),
     }
   }
 
@@ -190,7 +239,7 @@ export class MissionControlServer {
     const rootDir = this.context.directory ?? this.context.worktree ?? "."
     const sessionID = extractSessionID(payload)
     if (sessionID && shouldPersistSearchInvalidation(type)) {
-      await new MissionControlIndexDB(rootDir, this.config.search.indexPath).markDirtySessions([sessionID])
+      await new MissionControlIndexDB(rootDir, this.config.search.indexPath, undefined, { workspaceKey: this.workspaceKey }).markDirtySessions([sessionID])
     }
   }
 
@@ -249,7 +298,31 @@ export class MissionControlServer {
   async searchSessions(args: import("./types.js").SessionSearchArgs) {
     const adapter = this.adapter
     const rootDir = this.context.directory ?? this.context.worktree ?? "."
-    return this.searchService.search(adapter, this.config, rootDir, args, this.semanticProvider)
+    return this.searchService.search(adapter, this.config, rootDir, args, this.semanticProvider, this.workspaceID, this.workspaceKey)
+  }
+
+  async startTerminal(args: import("./terminals/registry.js").TerminalStartArgs) {
+    return this.terminalRegistry.start(args)
+  }
+
+  async listTerminals(filters: { sessionId?: string; status?: TerminalStatus }) {
+    return { terminals: this.terminalRegistry.list(filters) }
+  }
+
+  async getTerminal(id: string) {
+    return this.terminalRegistry.get(id)
+  }
+
+  async readTerminal(id: string, options: { offset?: number; limit?: number; ansi?: boolean }) {
+    return this.terminalRegistry.read(id, options)
+  }
+
+  async sendTerminal(id: string, args: { text?: string; keys?: string[] }) {
+    return this.terminalRegistry.send(id, args)
+  }
+
+  async cancelTerminal(id: string, options: { closePane?: boolean; ctrlC?: boolean }) {
+    return this.terminalRegistry.cancel(id, options)
   }
 
 }
@@ -259,8 +332,20 @@ const shouldPersistSearchInvalidation = (type: string) =>
     "session.created",
     "session.updated",
     "session.compacted",
+    "session.deleted",
     "message.updated",
     "message.removed",
     "message.part.updated",
     "message.part.removed",
   ].includes(type)
+
+const resolveAmbientWorkspaceID = (context: PluginContext) =>
+  extractWorkspaceID({
+    workspaceID: context.workspaceID,
+    workspaceId: context.workspaceId,
+    workspace: context.workspace,
+    project: context.project,
+  })
+
+const createWorkspaceKey = (workspaceID: string) =>
+  createHash("sha1").update(`workspace:${workspaceID}`).digest("hex").slice(0, 16)

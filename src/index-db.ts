@@ -27,10 +27,11 @@ export type { SearchIndexDocument, SearchIndexSessionCursor } from "./index-db/t
 export interface MissionControlIndexDBOptions {
   vectorExtensionPaths?: Partial<Record<NativeVectorBackendName, string>>
   vectorBackend?: VectorBackendPreference
+  workspaceKey?: string
 }
 
 export class MissionControlIndexDB {
-  private static readonly VERSION = 5
+  private static readonly VERSION = 6
   private readonly sqliteByPath = new Map<string, MissionControlSqliteDatabase>()
   private readonly storeByPath = new Map<string, SqliteSearchIndexStore>()
 
@@ -42,7 +43,7 @@ export class MissionControlIndexDB {
   ) {}
 
   getIndexPath(scope = this.discoveryScope ?? "current_directory") {
-    return resolveMissionControlSqliteCachePath(this.rootDir, scope, this.configuredIndexPath)
+    return resolveMissionControlSqliteCachePath(this.rootDir, scope, this.configuredIndexPath, this.options.workspaceKey)
   }
 
   async load(scope = this.discoveryScope): Promise<SearchIndexDocument | undefined> {
@@ -246,6 +247,7 @@ export class MissionControlIndexDB {
       builtAt: index?.builtAt,
       discoveryScope: index?.discovery.scope,
       discoveryDirectory: index?.discovery.directory,
+      discoveryWorkspaceID: index?.discovery.workspaceID,
       indexedSessionCount: index?.sessions.length,
       includeToolOutputsForIndexing: index?.settings.includeToolOutputsForIndexing ?? false,
       semanticSignature: index?.semantic?.signature,
@@ -262,7 +264,11 @@ export class MissionControlIndexDB {
       return false
     }
 
-    if (existing.discovery.scope !== discovery.scope || existing.discovery.directory !== discovery.directory) {
+    if (
+      existing.discovery.scope !== discovery.scope ||
+      existing.discovery.directory !== discovery.directory ||
+      existing.discovery.workspaceID !== discovery.workspaceID
+    ) {
       return false
     }
 
@@ -349,14 +355,14 @@ export class MissionControlIndexDB {
 
   private async loadLegacyIndex(scope: SessionDiscoveryScope): Promise<SearchIndexDocument | undefined> {
     try {
-      const path = resolveScopedIndexPath(this.rootDir, this.configuredIndexPath, scope)
+      const path = resolveScopedIndexPath(this.rootDir, this.configuredIndexPath, scope, this.options.workspaceKey)
       const content = await readFile(path, "utf8")
       const parsed = JSON.parse(content) as SearchIndexDocument
-      if (parsed.version !== MissionControlIndexDB.VERSION || parsed.discovery?.scope !== scope) {
+      if (![5, MissionControlIndexDB.VERSION].includes(parsed.version) || parsed.discovery?.scope !== scope) {
         return undefined
       }
 
-      return parsed
+      return { ...parsed, version: MissionControlIndexDB.VERSION }
     } catch {
       return undefined
     }
@@ -368,7 +374,7 @@ export class MissionControlIndexDB {
       return
     }
 
-    const path = resolveDirtyStorePath(this.rootDir, this.configuredIndexPath, scope)
+    const path = resolveDirtyStorePath(this.rootDir, this.configuredIndexPath, scope, this.options.workspaceKey)
     const snapshot = await this.loadDirtyStore(path)
     store.importLegacyDirtySessionsOnce(scope, snapshot.sessions)
   }

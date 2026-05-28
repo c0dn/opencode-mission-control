@@ -1,7 +1,7 @@
 import type { Plugin } from "@opencode-ai/plugin"
 
 import { resolveMissionControlRuntime } from "./config.js"
-import { MISSION_CONTROL_EVENT_HOOKS } from "./events.js"
+import { MISSION_CONTROL_DISPOSAL_EVENT_HOOKS, MISSION_CONTROL_EVENT_HOOKS } from "./events.js"
 import { MissionControlServer } from "./server.js"
 import { createMissionControlTools } from "./tools.js"
 import type { MissionControlPluginOptions } from "./types.js"
@@ -19,6 +19,14 @@ const TOOL_GUIDANCE: Record<string, string> = {
     "Use this for recent live state, not full transcript history. Example: mc_session_events({ sessionId: 'ses_123', withChildren: true, limit: 25 }).",
   mc_session_search:
     "Use this for indexed content search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'SessionLookupUnavailable', scope: 'global', exact: true }). Use mc_session_find for title lookup and mc_session_get when you already have a sessionId. Prefer mc_session_tail for recent text and mc_session_read only for deep transcript inspection.",
+  mc_terminal_start:
+    "Use this to run a command in a Zellij pane owned by an OpenCode session. Prefer argv command arrays; use commandString only when shell behavior is intended. Attach with the returned zellij command.",
+  mc_terminal_read:
+    "Use this to inspect terminal scrollback with offset/limit paging. Panes are addressed by Mission Control terminal id; underlying Zellij pane ids are session-local metadata.",
+  mc_terminal_send:
+    "Use this to send literal text and/or simple key chords such as Ctrl c, Enter, Tab, or Esc to the terminal pane.",
+  mc_terminal_cancel:
+    "Use this to interrupt a running terminal. It sends Ctrl-C by default and preserves the pane/scrollback unless closePane is explicitly true.",
 }
 
 export const applyMissionControlToolGuidance = (toolID: string, description: string) => {
@@ -35,10 +43,23 @@ export const MissionControlPlugin: Plugin = async (context: any, options?: Missi
   const server = await MissionControlServer.fromContext(context, config, secrets)
 
   return {
+    dispose: async () => {
+      await server.dispose()
+    },
     tool: createMissionControlTools(server),
     event: async (input: any) => {
       const runtimeEvent = input?.event ?? input
       const eventName = runtimeEvent?.type
+
+      if (
+        typeof eventName === "string" &&
+        MISSION_CONTROL_DISPOSAL_EVENT_HOOKS.includes(
+          eventName as (typeof MISSION_CONTROL_DISPOSAL_EVENT_HOOKS)[number],
+        )
+      ) {
+        await server.dispose()
+        return
+      }
 
       if (
         typeof eventName === "string" &&
