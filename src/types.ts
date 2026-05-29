@@ -89,6 +89,7 @@ export interface MissionControlCapabilityMatrix {
     sessionRead: boolean
     sessionTail: boolean
     sessionTree: boolean
+    sessionAbort: boolean
     indexedRetrieval: boolean
     semanticRetrieval: boolean
   }
@@ -142,10 +143,11 @@ export interface MissionControlStatus {
     sessionGet: boolean
     sessionFind: boolean
     sessionTail: boolean
-      sessionTree: boolean
-      sessionObserve: boolean
-       sessionSearch: boolean
-       terminalTools?: boolean
+    sessionTree: boolean
+    sessionAbort: boolean
+    sessionObserve: boolean
+    sessionSearch: boolean
+    terminalTools?: boolean
   }
   config: MissionControlConfig
   counters: {
@@ -285,6 +287,14 @@ export interface SessionTailResult {
   totalEntriesExact: boolean
 }
 
+export interface SessionAbortResult {
+  sessionId: string
+  requestAccepted: boolean
+  aborted?: boolean
+  result: unknown
+  note: string
+}
+
 export interface SessionTreeNode {
   sessionId: string
   title?: string
@@ -303,6 +313,16 @@ export interface SessionObserveResult {
     status?: string
     title?: string
   }>
+}
+
+export interface RuntimeChildSessionSummary {
+  sessionId: string
+  parentSessionId: string
+  title?: string
+  status?: string
+  directory?: string
+  workspaceID?: string
+  depth: number
 }
 
 export type DeepPartial<T> = {

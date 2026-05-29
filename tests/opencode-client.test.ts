@@ -206,6 +206,40 @@ describe("OpenCodeAdapter session APIs", () => {
     ])
   })
 
+  test("aborts sessions through the injected raw client with scope query", async () => {
+    const calls: Array<{ method: string; options: unknown }> = []
+    const adapter = new OpenCodeAdapter(
+      {
+        _client: {
+          async post(options: unknown) {
+            calls.push({ method: "post", options })
+            return { data: { cancelled: true }, response: new Response("{}") }
+          },
+        },
+        session: {
+          async abort() {
+            throw new Error("native session.abort should not be used when raw client is available")
+          },
+        },
+      },
+      {
+        workspaceID: "workspace-1",
+      },
+    )
+
+    expect(await adapter.abortSession("raw session/id", "/tmp/project")).toEqual({ cancelled: true })
+    expect(calls).toEqual([
+      {
+        method: "post",
+        options: {
+          url: "/session/raw%20session%2Fid/abort",
+          query: { directory: "/tmp/project", workspace: "workspace-1" },
+          throwOnError: true,
+        },
+      },
+    ])
+  })
+
   test("preserves raw session message paging cursor from response headers", async () => {
     const calls: Array<{ method: string; options: unknown }> = []
     const adapter = new OpenCodeAdapter({

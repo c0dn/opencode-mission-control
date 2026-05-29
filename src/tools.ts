@@ -105,6 +105,16 @@ export const createMissionControlTools = (server: MissionControlServer) => {
     },
   }),
 
+  mc_session_abort: tool({
+    description: "Abort/cancel an OpenCode session by session ID",
+    args: {
+      sessionId: tool.schema.string(),
+    },
+    async execute(args) {
+      return toPluginToolResult(await server.abortSession(args.sessionId), "Session Abort")
+    },
+  }),
+
   mc_session_events: tool({
     description: "Return recent events and live status for a session",
     args: {

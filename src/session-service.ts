@@ -15,6 +15,7 @@ import {
 import { MissionControlSourceDB, type SourceSessionRecord } from "./source-db.js"
 import type {
   SessionFindArgs,
+  SessionAbortResult,
   SessionFindResult,
   SessionGetResult,
   SessionMetadata,
@@ -43,6 +44,43 @@ export class MissionControlSessionService {
     } catch {
       await adapter.debug("getSession failed to resolve session", { sessionId })
       return fail("SessionNotFound", `Session '${sessionId}' was not found.`)
+    }
+  }
+
+  async abortSession(adapter: OpenCodeAdapter, sessionId: string): Promise<ToolResult<SessionAbortResult>> {
+    let resolved: Awaited<ReturnType<OpenCodeAdapter["resolveSession"]>>
+    try {
+      resolved = await adapter.resolveSession(sessionId)
+    } catch (error) {
+      await adapter.debug("abortSession failed to resolve session", {
+        sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return fail("SessionNotFound", `Session '${sessionId}' was not found.`)
+    }
+
+    try {
+      const result = await adapter.abortSession(sessionId, resolved.directory, resolved.workspaceID)
+      const aborted = typeof result === "boolean" ? result : undefined
+      return ok({
+        sessionId,
+        requestAccepted: true,
+        ...(aborted !== undefined ? { aborted } : {}),
+        result: result ?? null,
+        note: "Abort requested through OpenCode. This is most useful for background subagents by subagent session ID; foreground subagents can block the parent tool loop until they return.",
+      })
+    } catch (error) {
+      await adapter.debug("abortSession request failed", {
+        sessionId,
+        directory: resolved.directory,
+        workspaceID: resolved.workspaceID,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return fail(
+        "SessionLookupUnavailable",
+        "Session abort request failed.",
+        "Retry after the runtime settles, or verify that the target session is still running.",
+      )
     }
   }
 

@@ -174,6 +174,7 @@ export class MissionControlServer {
         sessionRead: exposesSessionTools,
         sessionTail: exposesSessionTools,
         sessionTree: exposesSessionTools,
+        sessionAbort: exposesSessionTools,
         indexedRetrieval: exposesSessionTools && this.config.search.lexicalEnabled,
         semanticRetrieval: exposesSessionTools && (this.semanticProvider?.isAvailable() ?? false),
       },
@@ -210,9 +211,10 @@ export class MissionControlServer {
         sessionRead: true,
         sessionTail: true,
         sessionTree: true,
+        sessionAbort: true,
         sessionObserve: true,
-          sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
-          terminalTools: true,
+        sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
+        terminalTools: true,
       },
       config: this.config,
       counters: this.runtimeState.counters(),
@@ -284,6 +286,11 @@ export class MissionControlServer {
     return this.sessionService.sessionTree(adapter, sessionId, depth)
   }
 
+  async abortSession(sessionId: string) {
+    const adapter = this.adapter
+    return this.sessionService.abortSession(adapter, sessionId)
+  }
+
   async observeSession(
     sessionId: string,
     options: {
@@ -323,6 +330,32 @@ export class MissionControlServer {
 
   async cancelTerminal(id: string, options: { closePane?: boolean; ctrlC?: boolean }) {
     return this.terminalRegistry.cancel(id, options)
+  }
+
+  compactionContext(sessionId: string) {
+    const children = this.runtimeState.childSessionSummaries(sessionId, { recursive: true, limit: 20 })
+    if (children.length === 0) {
+      return []
+    }
+
+    const lines = children.map((child) => {
+      const fields = [
+        `sessionId=${child.sessionId}`,
+        `parentSessionId=${child.parentSessionId}`,
+        child.title ? `title=${JSON.stringify(child.title)}` : undefined,
+        child.status ? `status=${child.status}` : undefined,
+        child.depth > 1 ? `depth=${child.depth}` : undefined,
+      ].filter(Boolean)
+      return `- ${fields.join("; ")}`
+    })
+
+    return [
+      [
+        "Mission Control known subagent sessions for this session:",
+        ...lines,
+        "Preserve these session IDs in the compacted summary when they may still be useful; running background subagents can be cancelled with mc_session_abort({ sessionId }).",
+      ].join("\n"),
+    ]
   }
 
 }

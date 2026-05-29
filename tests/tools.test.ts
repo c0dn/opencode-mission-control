@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 
 import { DEFAULT_CONFIG } from "../src/config.ts"
+import { applyMissionControlToolGuidance } from "../src/plugin.ts"
 import { createMissionControlTools } from "../src/tools.ts"
 
 describe("mc_session_search tool", () => {
@@ -113,6 +114,59 @@ describe("session metadata lookup tools", () => {
     await tools.mc_session_find.execute({ title: "Build notes", scope: "global", limit: 3 } as any, {} as any)
 
     expect(calls).toEqual([{ title: "Build notes", scope: "global", limit: 3 }])
+  })
+})
+
+describe("mc_session_abort tool", () => {
+  test("forwards a session id and returns a titled structured result", async () => {
+    const calls: string[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async abortSession(sessionId: string) {
+        calls.push(sessionId)
+        return {
+          ok: true,
+          data: {
+            sessionId,
+            requestAccepted: true,
+            aborted: true,
+            result: null,
+          },
+        }
+      },
+    } as any)
+
+    expect(Object.keys(tools.mc_session_abort.args)).toEqual(["sessionId"])
+
+    const result = await tools.mc_session_abort.execute({ sessionId: "ses_child" } as any, {} as any) as any
+    expect(result.title).toBe("Session Abort")
+    expect(JSON.parse(result.output)).toEqual({
+      ok: true,
+      data: {
+        sessionId: "ses_child",
+        requestAccepted: true,
+        aborted: true,
+        result: null,
+      },
+    })
+    expect(result.metadata).toEqual({
+      ok: true,
+      data: {
+        sessionId: "ses_child",
+        requestAccepted: true,
+        aborted: true,
+        result: null,
+      },
+    })
+    expect(calls).toEqual(["ses_child"])
+  })
+
+  test("adds guidance for background subagent cancellation", () => {
+    const description = applyMissionControlToolGuidance("mc_session_abort", "Abort/cancel an OpenCode session by session ID")
+
+    expect(description).toContain("background subagents")
+    expect(description).toContain("session abort endpoint")
   })
 })
 
@@ -237,6 +291,7 @@ describe("tool surface", () => {
     expect(tools.mc_session_get).toBeDefined()
     expect(tools.mc_session_find).toBeDefined()
     expect(tools.mc_session_tail).toBeDefined()
+    expect(tools.mc_session_abort).toBeDefined()
     expect(tools.mc_session_search).toBeDefined()
     expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "job_"))).toBe(false)
     expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "terminal_"))).toBe(true)
@@ -259,6 +314,7 @@ describe("tool surface", () => {
     expect(tools.mc_session_get).toBeDefined()
     expect(tools.mc_session_find).toBeDefined()
     expect(tools.mc_session_tail).toBeDefined()
+    expect(tools.mc_session_abort).toBeDefined()
     expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "job_"))).toBe(false)
     expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "terminal_"))).toBe(true)
     expect(tools.mc_terminal_start).toBeDefined()

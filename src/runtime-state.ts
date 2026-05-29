@@ -9,6 +9,7 @@ import {
   hasParentSessionReference,
 } from "./session-extractors.js"
 import type { MissionControlEventRecord, RuntimeSessionMetadata } from "./types.js"
+import type { RuntimeChildSessionSummary } from "./types.js"
 
 export class MissionControlRuntimeState {
   private bufferSize: number
@@ -122,6 +123,41 @@ export class MissionControlRuntimeState {
 
   childSessionIDs(parentSessionID: string) {
     return Array.from(this.childSessionIDsByParent.get(parentSessionID) ?? [])
+  }
+
+  childSessionSummaries(parentSessionID: string, options: { recursive?: boolean; limit?: number } = {}) {
+    const recursive = options.recursive ?? true
+    const limit = Math.max(1, Math.trunc(options.limit ?? 20))
+    const summaries: RuntimeChildSessionSummary[] = []
+    const visited = new Set<string>([parentSessionID])
+    const queue = this.childSessionIDs(parentSessionID).map((sessionID) => ({ sessionID, depth: 1 }))
+
+    while (queue.length > 0 && summaries.length < limit) {
+      const next = queue.shift()
+      if (!next || visited.has(next.sessionID)) {
+        continue
+      }
+      visited.add(next.sessionID)
+
+      const metadata = this.sessionMetadata.get(next.sessionID)
+      summaries.push({
+        sessionId: next.sessionID,
+        parentSessionId: metadata?.parentSessionId ?? parentSessionID,
+        title: metadata?.title,
+        status: this.statusForSession(next.sessionID),
+        directory: metadata?.directory,
+        workspaceID: metadata?.workspaceID,
+        depth: next.depth,
+      })
+
+      if (recursive) {
+        for (const childID of this.childSessionIDs(next.sessionID)) {
+          queue.push({ sessionID: childID, depth: next.depth + 1 })
+        }
+      }
+    }
+
+    return summaries
   }
 
   dirtySessionCount(sessionIDs?: Iterable<string>) {

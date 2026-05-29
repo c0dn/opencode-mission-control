@@ -126,6 +126,43 @@ describe("MissionControlSessionService", () => {
     expect(messagesCalled).toBe(false)
   })
 
+  test("aborts a resolved session using recovered directory and workspace scope", async () => {
+    const calls: unknown[] = []
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        calls.push({ method: "resolveSession", sessionId })
+        return {
+          session: { id: sessionId, directory: "/tmp/project", workspaceID: "workspace-1" },
+          directory: "/tmp/project",
+          workspaceID: "workspace-1",
+        }
+      },
+      async abortSession(sessionId: string, directory?: string, workspaceID?: string) {
+        calls.push({ method: "abortSession", sessionId, directory, workspaceID })
+        return false
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.abortSession(adapter, "ses_child")
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        sessionId: "ses_child",
+        requestAccepted: true,
+        aborted: false,
+        result: false,
+        note: "Abort requested through OpenCode. This is most useful for background subagents by subagent session ID; foreground subagents can block the parent tool loop until they return.",
+      },
+    })
+    expect(calls).toEqual([
+      { method: "resolveSession", sessionId: "ses_child" },
+      { method: "abortSession", sessionId: "ses_child", directory: "/tmp/project", workspaceID: "workspace-1" },
+    ])
+  })
+
   test("finds sessions by exact title and flags ambiguity", async () => {
     const adapter = new OpenCodeAdapter({
       session: {

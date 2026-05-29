@@ -209,6 +209,34 @@ export class OpenCodeAdapter {
     return unwrap(await this.client.session.messages(withScopeQuery({ path: { id: sessionID } }, resolvedDirectory, workspaceID))) as any[]
   }
 
+  async abortSession(sessionID: string, directory?: string, workspaceID = this.options.workspaceID) {
+    const resolvedDirectory = this.resolveDirectory(directory)
+
+    if (getRawClient(this.client)) {
+      return rawRequest(this.client, {
+        method: "POST",
+        path: `/session/${encodeURIComponent(sessionID)}/abort`,
+        query: scopeQuery(resolvedDirectory, workspaceID),
+        throwOnError: true,
+      })
+    }
+
+    if (this.publicClient?.session?.abort) {
+      return unwrap(
+        await this.publicClient.session.abort(this.scopedParams({ sessionID }, resolvedDirectory, workspaceID), {
+          responseStyle: "data",
+          throwOnError: true,
+        }),
+      )
+    }
+
+    if (this.client?.session?.abort) {
+      return unwrap(await this.client.session.abort(withScopeQuery({ path: { id: sessionID } }, resolvedDirectory, workspaceID)))
+    }
+
+    throw new Error("OpenCode client does not expose session abort")
+  }
+
   async getSessionMessagePage(
     sessionID: string,
     options: {

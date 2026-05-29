@@ -148,4 +148,45 @@ describe("MissionControlRuntimeState", () => {
     expect(state.metadataForSession("child-session")?.title).toBe("Child Session Renamed")
     expect(state.childSessionIDs("stale-parent")).toEqual([])
   })
+
+  test("summarizes known child sessions for compaction context", () => {
+    const state = new MissionControlRuntimeState(10)
+
+    state.recordEvent("session.created", {
+      sessionID: "child-a",
+      parentID: "root-session",
+      title: "Explore lane",
+      directory: "/tmp/project",
+    })
+    state.recordEvent("session.status", {
+      sessionID: "child-a",
+      status: { type: "busy" },
+    })
+    state.recordEvent("session.created", {
+      sessionID: "grandchild-a",
+      parentID: "child-a",
+      title: "Nested lane",
+    })
+
+    expect(state.childSessionSummaries("root-session")).toEqual([
+      {
+        sessionId: "child-a",
+        parentSessionId: "root-session",
+        title: "Explore lane",
+        status: "busy",
+        directory: "/tmp/project",
+        workspaceID: undefined,
+        depth: 1,
+      },
+      {
+        sessionId: "grandchild-a",
+        parentSessionId: "child-a",
+        title: "Nested lane",
+        status: undefined,
+        directory: undefined,
+        workspaceID: undefined,
+        depth: 2,
+      },
+    ])
+  })
 })

@@ -19,6 +19,7 @@ Detailed behavior and caveats live under `docs/`.
 - [`mc_session_find({ title, scope?, limit? })`](docs/mc_session_find.md) — find exact-title metadata candidates; titles can be ambiguous
 - [`mc_session_tail({ sessionId, offset?, limit?, withChildren? })`](docs/mc_session_tail.md) — view recent text-only messages
 - [`mc_session_tree({ sessionId, depth? })`](docs/mc_session_tree.md) — inspect a session’s parent/child tree
+- [`mc_session_abort({ sessionId })`](docs/mc_session_abort.md) — request cancellation of a session, primarily background subagents by subagent session ID
 - [`mc_session_events({ sessionId, withChildren?, limit? })`](docs/mc_session_events.md) — view recent live events and current status
 - [`mc_session_search({ query, scope?, exact?, limit? })`](docs/mc_session_search.md) — search indexed session content; `scope: "global"` widens discovery and `exact: true` forces lexical matching
 

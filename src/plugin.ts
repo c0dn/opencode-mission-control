@@ -17,6 +17,8 @@ const TOOL_GUIDANCE: Record<string, string> = {
     "Use this for the latest text-only session messages. Example: mc_session_tail({ sessionId: 'ses_123', limit: 10 }). Prefer this over mc_session_read when you only need the recent conversation.",
   mc_session_events:
     "Use this for recent live state, not full transcript history. Example: mc_session_events({ sessionId: 'ses_123', withChildren: true, limit: 25 }).",
+  mc_session_abort:
+    "Use this to request cancellation for an OpenCode session, primarily background subagents by subagent session ID. It calls OpenCode's public session abort endpoint. Foreground subagents can block the parent tool loop, so this works best when another active tool loop can issue the abort.",
   mc_session_search:
     "Use this for indexed content search. Examples: mc_session_search({ query: 'retry logic', limit: 5 }); mc_session_search({ query: 'SessionLookupUnavailable', scope: 'global', exact: true }). Use mc_session_find for title lookup and mc_session_get when you already have a sessionId. Prefer mc_session_tail for recent text and mc_session_read only for deep transcript inspection.",
   mc_terminal_start:
@@ -70,6 +72,22 @@ export const MissionControlPlugin: Plugin = async (context: any, options?: Missi
     },
     "tool.definition": async (input: any, output: any) => {
       output.description = applyMissionControlToolGuidance(input.toolID, output.description)
+    },
+    "experimental.session.compacting": async (input: any, output: any) => {
+      const sessionID = input?.sessionID
+      if (typeof sessionID !== "string") {
+        return
+      }
+
+      const context = server.compactionContext(sessionID)
+      if (context.length === 0) {
+        return
+      }
+
+      if (!Array.isArray(output.context)) {
+        output.context = []
+      }
+      output.context.push(...context)
     },
   } as any
 }

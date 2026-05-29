@@ -94,6 +94,39 @@ describe("MissionControlPlugin tool guidance", () => {
 
     expect(output.description).toBe("Plain tool description")
   })
+
+  test("experimental.session.compacting injects Mission Control subagent context", async () => {
+    MissionControlServer.fromContext = (async () => ({
+      config: DEFAULT_CONFIG,
+      status: async () => ({}),
+      readSession: async () => ({}),
+      sessionTree: async () => ({}),
+      observeSession: async () => ({}),
+      searchSessions: async () => ({}),
+      onRuntimeEvent: async () => undefined,
+      compactionContext(sessionId: string) {
+        return [`subagents for ${sessionId}: ses_child`]
+      },
+    }) as any)
+
+    const hooks = await MissionControlPlugin({
+      client: {
+        app: {
+          async log() {
+            return undefined
+          },
+        },
+      },
+      directory: "/tmp/project",
+      worktree: "/tmp/project",
+    } as any)
+
+    const output = { context: ["existing"], prompt: undefined as string | undefined }
+    await hooks["experimental.session.compacting"]?.({ sessionID: "ses_parent" } as any, output as any)
+
+    expect(output.context).toEqual(["existing", "subagents for ses_parent: ses_child"])
+    expect(output.prompt).toBeUndefined()
+  })
 })
 
 describe("MissionControlPlugin runtime hooks", () => {

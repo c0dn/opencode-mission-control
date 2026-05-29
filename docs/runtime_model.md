@@ -55,6 +55,21 @@ Mission Control exposes its session, search, observe, and Zellij terminal tools 
 - anchored reads (`beforeMessageId`) and runtimes without the raw request client still use the exact full-history path.
 - because the upstream session-message API does not expose a total-count field, `totalEntriesExact` is `false` and `totalEntries` is only a lower bound whenever `hasMore` is `true` on the raw paged path.
 
+## Session abort
+
+- `mc_session_abort` calls OpenCode's public `POST /session/{sessionID}/abort` API through the active client scope.
+- The tool is intended primarily for cancelling background subagents by subagent session ID.
+- Foreground subagents can block the parent tool loop, so cancellation is most reliable when another active tool loop can issue the abort request.
+- Mission Control does not mutate OpenCode storage directly when aborting; the only mutation is the public OpenCode API call.
+
+## Subagent IDs during compaction
+
+- Mission Control records observed parent/child session links from `session.created` and `session.updated` events in the live runtime state.
+- When OpenCode exposes `experimental.session.compacting`, Mission Control appends a compact context block listing known child/subagent session IDs for the session being compacted.
+- This context is intended to preserve IDs for running or recently launched background subagents so later turns can inspect or cancel them with `mc_session_abort`.
+- The injection is best-effort and in-memory. Without a persisted sidecar, IDs observed before plugin startup or after plugin restart may be missing.
+- `session.compacted` is too late to affect the summary currently being generated; compaction context must be injected through the pre-compaction experimental hook.
+
 ## Event handling model
 
 Mission Control listens to OpenCode events and maps them to runtime state updates.
