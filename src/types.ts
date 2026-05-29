@@ -90,6 +90,7 @@ export interface MissionControlCapabilityMatrix {
     sessionTail: boolean
     sessionTree: boolean
     sessionAbort: boolean
+    sessionSend: boolean
     indexedRetrieval: boolean
     semanticRetrieval: boolean
   }
@@ -145,6 +146,7 @@ export interface MissionControlStatus {
     sessionTail: boolean
     sessionTree: boolean
     sessionAbort: boolean
+    sessionSend: boolean
     sessionObserve: boolean
     sessionSearch: boolean
     terminalTools?: boolean
@@ -292,6 +294,15 @@ export interface SessionAbortResult {
   requestAccepted: boolean
   aborted?: boolean
   result: unknown
+  note: string
+}
+
+export interface SessionSendResult {
+  targetSessionId: string
+  fromSessionId?: string
+  delivery: "async" | "interrupt"
+  requestAccepted: boolean
+  aborted?: boolean
   note: string
 }
 

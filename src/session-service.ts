@@ -21,6 +21,7 @@ import type {
   SessionMetadata,
   SessionObserveResult,
   SessionReadResult,
+  SessionSendResult,
   SessionTailEntry,
   SessionTailResult,
   SessionTranscriptEntry,
@@ -82,6 +83,121 @@ export class MissionControlSessionService {
         "Retry after the runtime settles, or verify that the target session is still running.",
       )
     }
+  }
+
+  async sendMessageAsync(
+    adapter: OpenCodeAdapter,
+    targetSessionId: string,
+    text: string,
+    fromSessionId?: string,
+  ): Promise<ToolResult<SessionSendResult>> {
+    let resolved: Awaited<ReturnType<OpenCodeAdapter["resolveSession"]>>
+    try {
+      resolved = await adapter.resolveSession(targetSessionId)
+    } catch (error) {
+      await adapter.debug("sendMessageAsync failed to resolve session", {
+        targetSessionId,
+        fromSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      if (error instanceof GlobalSessionDiscoveryError) {
+        return fail(
+          "GlobalSessionDiscoveryUnavailable",
+          "Global session discovery is unavailable from this OpenCode runtime.",
+          "Retry from the directory that owns the target session.",
+        )
+      }
+      return fail("SessionNotFound", `Session '${targetSessionId}' was not found.`)
+    }
+
+    const envelope = buildInterAgentMessage({ fromSessionId, text })
+    const delivery = await adapter.sendSessionMessageAsync(targetSessionId, envelope, {
+      directory: resolved.directory,
+      workspaceID: resolved.workspaceID,
+    })
+    if (!delivery.ok) {
+      return fail(
+        "SessionLookupUnavailable",
+        `Failed to deliver message to session '${targetSessionId}'.`,
+        "Verify the target session is still running, or retry after the runtime settles.",
+      )
+    }
+
+    return ok({
+      targetSessionId,
+      fromSessionId,
+      delivery: "async",
+      requestAccepted: true,
+      note: "Message queued via OpenCode prompt_async; the target session processes it at its next loop boundary, not mid-response.",
+    })
+  }
+
+  async sendMessageInterrupt(
+    adapter: OpenCodeAdapter,
+    targetSessionId: string,
+    text: string,
+    fromSessionId?: string,
+  ): Promise<ToolResult<SessionSendResult>> {
+    let resolved: Awaited<ReturnType<OpenCodeAdapter["resolveSession"]>>
+    try {
+      resolved = await adapter.resolveSession(targetSessionId)
+    } catch (error) {
+      await adapter.debug("sendMessageInterrupt failed to resolve session", {
+        targetSessionId,
+        fromSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      if (error instanceof GlobalSessionDiscoveryError) {
+        return fail(
+          "GlobalSessionDiscoveryUnavailable",
+          "Global session discovery is unavailable from this OpenCode runtime.",
+          "Retry from the directory that owns the target session.",
+        )
+      }
+      return fail("SessionNotFound", `Session '${targetSessionId}' was not found.`)
+    }
+
+    let aborted: boolean | undefined
+    try {
+      const abortResult = await adapter.abortSession(targetSessionId, resolved.directory, resolved.workspaceID)
+      aborted = typeof abortResult === "boolean" ? abortResult : undefined
+    } catch (error) {
+      await adapter.debug("sendMessageInterrupt abort attempt failed", {
+        targetSessionId,
+        fromSessionId,
+        directory: resolved.directory,
+        workspaceID: resolved.workspaceID,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      aborted = undefined
+    }
+
+    const envelope = buildInterAgentMessage({ fromSessionId, text })
+    const delivery = await adapter.sendSessionMessageAsync(targetSessionId, envelope, {
+      directory: resolved.directory,
+      workspaceID: resolved.workspaceID,
+    })
+    if (!delivery.ok) {
+      return fail(
+        "SessionLookupUnavailable",
+        aborted === true
+          ? `Failed to deliver message to session '${targetSessionId}'; the target may already have been aborted.`
+          : `Failed to deliver message to session '${targetSessionId}'.`,
+        "Verify the target session is still running, or retry after the runtime settles.",
+      )
+    }
+
+    return ok({
+      targetSessionId,
+      fromSessionId,
+      delivery: "interrupt",
+      requestAccepted: true,
+      ...(aborted !== undefined ? { aborted } : {}),
+      note:
+        aborted === true
+          ? "Target session aborted, then message queued via prompt_async so it is picked up immediately. Aborting interrupts the target's current in-flight response."
+          : "Abort was requested (target may not have had an in-flight response); message queued via prompt_async for immediate pickup at the next loop boundary.",
+    })
   }
 
   async findSessions(adapter: OpenCodeAdapter, args: SessionFindArgs): Promise<ToolResult<SessionFindResult>> {
@@ -722,6 +838,13 @@ export class MissionControlSessionService {
 }
 
 const getMessageID = (message: any) => (typeof message?.info?.id === "string" ? message.info.id : undefined)
+
+const escapeXmlText = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+
+const escapeXmlAttribute = (value: string) => escapeXmlText(value).replace(/"/g, "&quot;")
+
+const buildInterAgentMessage = ({ fromSessionId, text }: { fromSessionId?: string; text: string }) =>
+  `<inter_agent_message from="${escapeXmlAttribute(fromSessionId ?? "unknown")}">\n${escapeXmlText(text)}\n</inter_agent_message>`
 
 interface SessionMessageRecord {
   sessionID: string

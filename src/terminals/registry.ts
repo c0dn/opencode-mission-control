@@ -3,7 +3,13 @@ import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 
 import type { OpenCodeAdapter } from "../opencode-client.js"
-import { ZellijAdapter } from "./zellij.js"
+import {
+  getPreferredPanes,
+  normalizePaneID,
+  validateRunArgs,
+  validateSessionName,
+  ZellijAdapter,
+} from "./zellij.js"
 
 export type TerminalStatus = "running" | "completed" | "cancelled" | "error"
 
@@ -26,13 +32,18 @@ export interface TerminalRecord {
 }
 
 export interface TerminalStartArgs {
-  sessionId: string
+  sessionId?: string
   command?: string[]
   commandString?: string
   cwd?: string
   title?: string
   label?: string
   floating?: boolean
+  direction?: "right" | "down"
+  inPlace?: boolean
+  closeOnExit?: boolean
+  startSuspended?: boolean
+  sessionName?: string
 }
 
 export class TerminalNotFoundError extends Error {
@@ -61,26 +72,38 @@ export class MissionControlTerminalRegistry {
   }
 
   async start(args: TerminalStartArgs) {
+    const ownerSessionId = args.sessionId
+    if (!ownerSessionId) {
+      throw new Error("mc_terminal_start requires a session id: pass sessionId or call from a session context")
+    }
     const command = normalizeCommand(args)
+    validateRunArgs({ floating: args.floating, inPlace: args.inPlace, direction: args.direction })
     const terminalId = `term_${Date.now().toString(36)}_${(++this.counter).toString(36)}`
-    const zellijSessionName = terminalSessionName(args.sessionId)
+    const zellijSessionName = args.sessionName
+      ? validateSessionName(args.sessionName)
+      : terminalSessionName(ownerSessionId)
     const sentinelDir = await mkdtemp(join(tmpdir(), "mc-terminal-"))
     const sentinelPath = join(sentinelDir, "exit-code")
     const title = args.title ?? args.label ?? terminalId
 
     await this.adapter.ensureBackgroundSession(zellijSessionName)
-    const paneId = await this.adapter.newPane({
+    const pane = await this.adapter.newPane({
       sessionName: zellijSessionName,
       command: wrapCommandForSentinel(command, sentinelPath),
       cwd: args.cwd,
       title,
       floating: Boolean(args.floating),
+      direction: args.direction,
+      inPlace: args.inPlace,
+      closeOnExit: args.closeOnExit,
+      startSuspended: args.startSuspended,
     })
+    const paneId = pane.paneId
 
     const now = Date.now()
     const record: TerminalRecord = {
       id: terminalId,
-      ownerSessionId: args.sessionId,
+      ownerSessionId,
       zellijSessionName,
       paneId,
       status: "running",
@@ -100,6 +123,8 @@ export class MissionControlTerminalRegistry {
     return {
       terminal: this.toPublicRecord(record),
       followCommand: `zellij attach ${shellQuote(zellijSessionName)}`,
+      appliedDirection: pane.appliedDirection,
+      ...(pane.warning ? { warning: pane.warning } : {}),
     }
   }
 
@@ -167,6 +192,59 @@ export class MissionControlTerminalRegistry {
     record.updatedAt = Date.now()
     await this.notify(record, previewBeforeClose)
     return { terminal: this.toPublicRecord(record) }
+  }
+
+  resolveZellijSessionName(args: { session?: string; sessionId?: string }): string {
+    if (args.session) {
+      return validateSessionName(args.session)
+    }
+    if (args.sessionId) {
+      return terminalSessionName(args.sessionId)
+    }
+    throw new Error(
+      "Live Zellij inspection requires a session: pass an explicit session name, a sessionId, or call from a session context",
+    )
+  }
+
+  async listPanesLive(args: { session?: string; sessionId?: string; all?: boolean }) {
+    const name = this.resolveZellijSessionName(args)
+    const panes = await this.adapter.listNormalizedPanes(name, { all: args.all })
+    const focusedPaneIDs = getPreferredPanes(panes).map((pane) => pane.paneID)
+    return {
+      session: name,
+      paneCount: panes.length,
+      focusedPaneID: focusedPaneIDs.length === 1 ? focusedPaneIDs[0]! : null,
+      focusedPaneIDs,
+      panes,
+    }
+  }
+
+  async capturePaneLive(args: {
+    session?: string
+    sessionId?: string
+    paneId?: string
+    full?: boolean
+    ansi?: boolean
+  }) {
+    const name = this.resolveZellijSessionName(args)
+    const resolvedPane = args.paneId ? normalizePaneID(args.paneId) : null
+    const content = await this.adapter.captureByPane(name, resolvedPane, { full: args.full, ansi: args.ansi })
+    return {
+      session: name,
+      paneId: resolvedPane,
+      full: Boolean(args.full),
+      ansi: Boolean(args.ansi),
+      content,
+    }
+  }
+
+  async listZellijSessions() {
+    const sessions = await this.adapter.listSessions()
+    return {
+      count: sessions.length,
+      currentSession: sessions.find((session) => session.current)?.name ?? null,
+      sessions,
+    }
   }
 
   dispose() {
@@ -287,7 +365,8 @@ const wrapCommandForSentinel = (command: string[], sentinelPath: string) => [
   ...command,
 ]
 
-const terminalSessionName = (sessionId: string) => `mc-${sessionId.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 80)}`
+export const terminalSessionName = (sessionId: string) =>
+  `mc-${sessionId.replace(/[^A-Za-z0-9_.-]/g, "-").slice(0, 80)}`
 
 const shellQuote = (value: string) => /^[A-Za-z0-9_./:-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`
 const escapeAttribute = (value: string) => value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")

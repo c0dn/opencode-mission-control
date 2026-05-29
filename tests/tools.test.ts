@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { DEFAULT_CONFIG } from "../src/config.ts"
 import { applyMissionControlToolGuidance } from "../src/plugin.ts"
 import { createMissionControlTools } from "../src/tools.ts"
+import { ZellijCommandError } from "../src/terminals/zellij.ts"
 
 describe("mc_session_search tool", () => {
   test("returns titled plugin result with output and metadata", async () => {
@@ -170,6 +171,82 @@ describe("mc_session_abort tool", () => {
   })
 })
 
+describe("inter-session messaging tools", () => {
+  test("mc_session_send_async forwards target, message, and sender, and titles the result", async () => {
+    const calls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async sendSessionMessageAsync(targetSessionId: string, message: string, fromSessionId?: string) {
+        calls.push({ targetSessionId, message, fromSessionId })
+        return {
+          ok: true,
+          data: {
+            targetSessionId,
+            fromSessionId,
+            delivery: "async",
+            requestAccepted: true,
+            note: "queued",
+          },
+        }
+      },
+    } as any)
+
+    expect(Object.keys(tools.mc_session_send_async.args).sort()).toEqual(["message", "targetSessionId"].sort())
+
+    const result = (await tools.mc_session_send_async.execute(
+      { targetSessionId: "ses_target", message: "hello" } as any,
+      { sessionID: "ses_sender" } as any,
+    )) as any
+
+    expect(result.title).toBe("Session Message Sent")
+    expect(calls).toEqual([{ targetSessionId: "ses_target", message: "hello", fromSessionId: "ses_sender" }])
+  })
+
+  test("mc_session_send_interrupt forwards target, message, and sender, and titles the result", async () => {
+    const calls: unknown[] = []
+
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async sendSessionMessageInterrupt(targetSessionId: string, message: string, fromSessionId?: string) {
+        calls.push({ targetSessionId, message, fromSessionId })
+        return {
+          ok: true,
+          data: {
+            targetSessionId,
+            fromSessionId,
+            delivery: "interrupt",
+            requestAccepted: true,
+            aborted: true,
+            note: "interrupted",
+          },
+        }
+      },
+    } as any)
+
+    expect(Object.keys(tools.mc_session_send_interrupt.args).sort()).toEqual(["message", "targetSessionId"].sort())
+
+    const result = (await tools.mc_session_send_interrupt.execute(
+      { targetSessionId: "ses_target", message: "stop now" } as any,
+      { sessionID: "ses_sender" } as any,
+    )) as any
+
+    expect(result.title).toBe("Session Interrupt Sent")
+    expect(calls).toEqual([{ targetSessionId: "ses_target", message: "stop now", fromSessionId: "ses_sender" }])
+  })
+
+  test("adds guidance describing async loop-boundary delivery", () => {
+    const description = applyMissionControlToolGuidance(
+      "mc_session_send_async",
+      "Queue a message into another OpenCode session without blocking; the target processes it at its next loop boundary",
+    )
+
+    expect(description).toContain("next loop boundary")
+    expect(description).toContain("inter_agent_message")
+    expect(description).toContain("mc_session_tail")
+  })
+})
+
 describe("mc_session_read tool", () => {
   test("forwards beforeMessageId to the session service", async () => {
     const calls: unknown[] = []
@@ -319,6 +396,156 @@ describe("tool surface", () => {
     expect(Object.keys(tools).some((toolName) => toolName.startsWith("mc_" + "terminal_"))).toBe(true)
     expect(tools.mc_terminal_start).toBeDefined()
     expect(tools.mc_terminal_cancel).toBeDefined()
+  })
+
+  test("mc_terminal_start falls back to context.sessionID when sessionId arg is omitted", async () => {
+    const calls: unknown[] = []
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async startTerminal(args: unknown) {
+        calls.push(args)
+        return { terminal: { id: "term_1" }, followCommand: "zellij attach mc-ses_ctx" }
+      },
+    } as any)
+
+    await tools.mc_terminal_start.execute(
+      { command: ["printf", "ok"] } as any,
+      { sessionID: "ses_ctx" } as any,
+    )
+
+    expect(calls).toEqual([
+      {
+        sessionId: "ses_ctx",
+        command: ["printf", "ok"],
+        commandString: undefined,
+        cwd: undefined,
+        title: undefined,
+        label: undefined,
+        floating: undefined,
+        direction: undefined,
+        inPlace: undefined,
+        closeOnExit: undefined,
+        startSuspended: undefined,
+        sessionName: undefined,
+      },
+    ])
+  })
+
+  test("mc_terminal_start prefers the explicit sessionId arg over context.sessionID", async () => {
+    const calls: unknown[] = []
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async startTerminal(args: any) {
+        calls.push(args.sessionId)
+        return { terminal: { id: "term_1" }, followCommand: "" }
+      },
+    } as any)
+
+    await tools.mc_terminal_start.execute(
+      { sessionId: "ses_explicit", command: ["true"] } as any,
+      { sessionID: "ses_ctx" } as any,
+    )
+
+    expect(calls).toEqual(["ses_explicit"])
+  })
+
+  test("mc_terminal_panes resolves owner sessionId via context and forwards all", async () => {
+    const calls: unknown[] = []
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async listTerminalPanes(args: unknown) {
+        calls.push(args)
+        return { session: "mc-ses_ctx", paneCount: 0, focusedPaneID: null, panes: [] }
+      },
+    } as any)
+
+    await tools.mc_terminal_panes.execute({ all: false } as any, { sessionID: "ses_ctx" } as any)
+    expect(calls).toEqual([{ session: undefined, sessionId: "ses_ctx", all: false }])
+  })
+
+  test("mc_terminal_capture forwards explicit session + paneId", async () => {
+    const calls: unknown[] = []
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async captureTerminalPane(args: unknown) {
+        calls.push(args)
+        return { session: "mc-x", paneId: "terminal_9", full: true, ansi: false, content: "" }
+      },
+    } as any)
+
+    await tools.mc_terminal_capture.execute(
+      { session: "mc-x", paneId: "9", full: true } as any,
+      {} as any,
+    )
+    expect(calls).toEqual([
+      { session: "mc-x", sessionId: undefined, paneId: "9", full: true, ansi: undefined },
+    ])
+  })
+
+  test("mc_terminal_sessions lists zellij sessions", async () => {
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async listZellijSessions() {
+        return { count: 1, currentSession: "mc-a", sessions: [{ name: "mc-a", current: true, raw: "mc-a (current)" }] }
+      },
+    } as any)
+
+    const result = (await tools.mc_terminal_sessions.execute({} as any, {} as any)) as any
+    expect(result.title).toBe("Zellij Sessions")
+    expect(JSON.parse(result.output).currentSession).toBe("mc-a")
+  })
+
+  test("mc_terminal_capture returns a structured resolution error for an invalid pane id", async () => {
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async captureTerminalPane() {
+        throw new Error("Invalid pane ID. Use terminal_<n>, plugin_<n>, or a bare integer.")
+      },
+    } as any)
+
+    const result = (await tools.mc_terminal_capture.execute(
+      { session: "mc-x", paneId: "nope" } as any,
+      {} as any,
+    )) as any
+    const output = JSON.parse(result.output)
+    expect(output.ok).toBe(false)
+    expect(output.error.code).toBe("TerminalResolutionError")
+  })
+
+  test("live terminal tools return structured resolution errors for Zellij command failures", async () => {
+    const zellijFailure = () =>
+      new ZellijCommandError("zellij live command failed", ["--session", "missing", "action", "list-panes"], {
+        stdout: "partial pane json",
+        stderr: "No such session: missing",
+        exitCode: 1,
+      })
+    const tools = createMissionControlTools({
+      config: DEFAULT_CONFIG,
+      async listTerminalPanes() {
+        throw zellijFailure()
+      },
+      async captureTerminalPane() {
+        throw zellijFailure()
+      },
+      async listZellijSessions() {
+        throw zellijFailure()
+      },
+    } as any)
+
+    for (const [terminalTool, args] of [
+      [tools.mc_terminal_panes, { session: "missing" }],
+      [tools.mc_terminal_capture, { session: "missing", paneId: "1" }],
+      [tools.mc_terminal_sessions, {}],
+    ] as const) {
+      const result = (await terminalTool.execute(args as any, {} as any)) as any
+      const output = JSON.parse(result.output)
+
+      expect(output.ok).toBe(false)
+      expect(output.error.code).toBe("TerminalResolutionError")
+      expect(output.error.message).toContain("zellij live command failed")
+      expect(output.error.message).toContain("stderr: No such session: missing")
+      expect(output.error.message).toContain("stdout: partial pane json")
+    }
   })
 
   test("terminal tool handlers return structured not-found errors", async () => {

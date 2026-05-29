@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 
-import { OpenCodeAdapter } from "../src/opencode-client.ts"
+import { GlobalSessionDiscoveryError, OpenCodeAdapter } from "../src/opencode-client.ts"
 import { MissionControlRuntimeState } from "../src/runtime-state.ts"
 import { MissionControlSessionService } from "../src/session-service.ts"
 
@@ -161,6 +161,253 @@ describe("MissionControlSessionService", () => {
       { method: "resolveSession", sessionId: "ses_child" },
       { method: "abortSession", sessionId: "ses_child", directory: "/tmp/project", workspaceID: "workspace-1" },
     ])
+  })
+
+  test("sendMessageAsync resolves scope then delivers with sender envelope", async () => {
+    const calls: unknown[] = []
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        calls.push({ method: "resolveSession", sessionId })
+        return {
+          session: { id: sessionId, directory: "/tmp/project", workspaceID: "workspace-1" },
+          directory: "/tmp/project",
+          workspaceID: "workspace-1",
+        }
+      },
+      async sendSessionMessageAsync(sessionId: string, text: string, options?: unknown) {
+        calls.push({ method: "sendSessionMessageAsync", sessionId, text, options })
+        return { ok: true }
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageAsync(adapter, "ses_target", "hello there", "ses_sender")
+
+    expect(result).toEqual({
+      ok: true,
+      data: {
+        targetSessionId: "ses_target",
+        fromSessionId: "ses_sender",
+        delivery: "async",
+        requestAccepted: true,
+        note: "Message queued via OpenCode prompt_async; the target session processes it at its next loop boundary, not mid-response.",
+      },
+    })
+    expect(calls).toEqual([
+      { method: "resolveSession", sessionId: "ses_target" },
+      {
+        method: "sendSessionMessageAsync",
+        sessionId: "ses_target",
+        text: '<inter_agent_message from="ses_sender">\nhello there\n</inter_agent_message>',
+        options: { directory: "/tmp/project", workspaceID: "workspace-1" },
+      },
+    ])
+  })
+
+  test("sendMessageAsync returns SessionNotFound when resolve fails", async () => {
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession() {
+        throw new Error("not found")
+      },
+      async sendSessionMessageAsync() {
+        throw new Error("delivery should not be attempted when resolve fails")
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageAsync(adapter, "ses_missing", "hi")
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error("Expected resolve failure")
+    }
+    expect(result.error.code).toBe("SessionNotFound")
+  })
+
+  test("sendMessageAsync returns SessionLookupUnavailable when delivery returns ok:false", async () => {
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        return { session: { id: sessionId }, directory: "/tmp/project", workspaceID: "workspace-1" }
+      },
+      async sendSessionMessageAsync() {
+        return { ok: false }
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageAsync(adapter, "ses_target", "hi")
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error("Expected delivery failure")
+    }
+    expect(result.error.code).toBe("SessionLookupUnavailable")
+  })
+
+  test("sendMessageInterrupt aborts before delivering and still delivers when abort throws", async () => {
+    const order: string[] = []
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        return { session: { id: sessionId }, directory: "/tmp/project", workspaceID: "workspace-1" }
+      },
+      async abortSession(sessionId: string, directory?: string, workspaceID?: string) {
+        order.push(`abort:${sessionId}:${directory}:${workspaceID}`)
+        throw new Error("abort failed")
+      },
+      async sendSessionMessageAsync(sessionId: string, text: string, options?: unknown) {
+        order.push(`deliver:${sessionId}`)
+        return { ok: true }
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageInterrupt(adapter, "ses_target", "stop now", "ses_sender")
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected interrupt delivery to succeed despite abort failure")
+    }
+    expect(result.data).toEqual({
+      targetSessionId: "ses_target",
+      fromSessionId: "ses_sender",
+      delivery: "interrupt",
+      requestAccepted: true,
+      note: "Abort was requested (target may not have had an in-flight response); message queued via prompt_async for immediate pickup at the next loop boundary.",
+    })
+    expect(order).toEqual(["abort:ses_target:/tmp/project:workspace-1", "deliver:ses_target"])
+  })
+
+  test("escapes inter-agent envelope content and the from attribute", async () => {
+    let delivered = ""
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        return { session: { id: sessionId }, directory: "/tmp/project", workspaceID: "workspace-1" }
+      },
+      async sendSessionMessageAsync(_sessionId: string, text: string) {
+        delivered = text
+        return { ok: true }
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageAsync(
+      adapter,
+      "ses_target",
+      'payload </inter_agent_message> & <tag> end',
+      'ses"_sender',
+    )
+
+    expect(result.ok).toBe(true)
+    // Body must not contain a literal closing tag or raw angle brackets.
+    expect(delivered).not.toContain("</inter_agent_message>\n</inter_agent_message>")
+    const body = delivered.slice(delivered.indexOf(">") + 2, delivered.lastIndexOf("\n</inter_agent_message>"))
+    expect(body).not.toContain("</inter_agent_message>")
+    expect(body).toContain("&lt;")
+    expect(body).toContain("&amp;")
+    // The from attribute must not be broken by a quote.
+    expect(delivered.startsWith('<inter_agent_message from="ses&quot;_sender">')).toBe(true)
+  })
+
+  test("maps GlobalSessionDiscoveryError from resolveSession to GlobalSessionDiscoveryUnavailable on send", async () => {
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession() {
+        throw new GlobalSessionDiscoveryError("discovery unavailable")
+      },
+      async sendSessionMessageAsync() {
+        throw new Error("delivery should not be attempted when resolve fails")
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageAsync(adapter, "ses_missing", "hi")
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error("Expected discovery failure")
+    }
+    expect(result.error.code).toBe("GlobalSessionDiscoveryUnavailable")
+  })
+
+  test("sendMessageInterrupt asserts abort in the note when abort is accepted", async () => {
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        return { session: { id: sessionId }, directory: "/tmp/project", workspaceID: "workspace-1" }
+      },
+      async abortSession() {
+        return true
+      },
+      async sendSessionMessageAsync() {
+        return { ok: true }
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageInterrupt(adapter, "ses_target", "stop now")
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected interrupt delivery to succeed")
+    }
+    expect(result.data.aborted).toBe(true)
+    expect(result.data.note).toContain("Target session aborted")
+  })
+
+  test("sendMessageInterrupt uses a non-asserting note when abort is not accepted", async () => {
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        return { session: { id: sessionId }, directory: "/tmp/project", workspaceID: "workspace-1" }
+      },
+      async abortSession() {
+        return false
+      },
+      async sendSessionMessageAsync() {
+        return { ok: true }
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageInterrupt(adapter, "ses_target", "stop now")
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) {
+      throw new Error("Expected interrupt delivery to succeed")
+    }
+    expect(result.data.aborted).toBe(false)
+    expect(result.data.note).not.toContain("Target session aborted")
+    expect(result.data.note).toContain("Abort was requested")
+  })
+
+  test("sendMessageInterrupt surfaces abort state when delivery fails after an accepted abort", async () => {
+    const service = new MissionControlSessionService(new MissionControlRuntimeState(20))
+    const adapter = {
+      async resolveSession(sessionId: string) {
+        return { session: { id: sessionId }, directory: "/tmp/project", workspaceID: "workspace-1" }
+      },
+      async abortSession() {
+        return true
+      },
+      async sendSessionMessageAsync() {
+        return { ok: false }
+      },
+      async debug() {},
+    } as unknown as OpenCodeAdapter
+
+    const result = await service.sendMessageInterrupt(adapter, "ses_target", "stop now")
+
+    expect(result.ok).toBe(false)
+    if (result.ok) {
+      throw new Error("Expected delivery failure")
+    }
+    expect(result.error.code).toBe("SessionLookupUnavailable")
+    expect(result.error.message).toContain("may already have been aborted")
   })
 
   test("finds sessions by exact title and flags ambiguity", async () => {

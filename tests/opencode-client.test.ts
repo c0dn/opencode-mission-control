@@ -76,6 +76,138 @@ describe("OpenCodeAdapter session APIs", () => {
   })
 
 
+  test("sends async session messages through the raw prompt_async path without noReply", async () => {
+    const calls: unknown[] = []
+    const adapter = new OpenCodeAdapter(
+      {
+        _client: {
+          async post(options: unknown) {
+            calls.push(options)
+            return { data: { ok: true }, response: new Response("{}") }
+          },
+        },
+        session: {},
+      },
+      {
+        workspaceID: "workspace-1",
+      },
+    )
+
+    expect(
+      await adapter.sendSessionMessageAsync("ses_123", "hello", { directory: "/tmp/project" }),
+    ).toEqual({ ok: true })
+    expect(calls).toEqual([
+      {
+        url: "/session/ses_123/prompt_async",
+        query: { directory: "/tmp/project", workspace: "workspace-1" },
+        body: { parts: [{ type: "text", text: "hello" }] },
+        throwOnError: true,
+      },
+    ])
+  })
+
+  test("falls back to publicClient.session.promptAsync for async session delivery", async () => {
+    const publicCalls: unknown[] = []
+    const adapter = new OpenCodeAdapter(
+      { session: {} },
+      {
+        sdkClient: {
+          session: {
+            async promptAsync(args: unknown, options?: unknown) {
+              publicCalls.push({ args, options })
+              return { ok: true }
+            },
+          },
+        },
+      },
+    )
+
+    expect(await adapter.sendSessionMessageAsync("ses_public", "hello")).toEqual({ ok: true })
+    expect(publicCalls[0]).toMatchObject({
+      args: { sessionID: "ses_public", parts: [{ type: "text", text: "hello" }] },
+      options: { responseStyle: "data", throwOnError: true },
+    })
+    expect((publicCalls[0] as any).args).not.toHaveProperty("noReply")
+  })
+
+  test("falls through from a throwing raw client to publicClient.session.promptAsync", async () => {
+    const rawCalls: unknown[] = []
+    const publicCalls: unknown[] = []
+    const adapter = new OpenCodeAdapter(
+      {
+        _client: {
+          async post(options: unknown) {
+            rawCalls.push(options)
+            throw new Error("raw prompt_async unavailable")
+          },
+        },
+        session: {},
+      },
+      {
+        sdkClient: {
+          session: {
+            async promptAsync(args: unknown, options?: unknown) {
+              publicCalls.push({ args, options })
+              return { ok: true }
+            },
+          },
+        },
+      },
+    )
+
+    expect(await adapter.sendSessionMessageAsync("ses_fallback", "hello")).toEqual({ ok: true })
+    expect(rawCalls).toHaveLength(1)
+    expect(publicCalls).toHaveLength(1)
+    expect(publicCalls[0]).toMatchObject({
+      args: { sessionID: "ses_fallback", parts: [{ type: "text", text: "hello" }] },
+      options: { responseStyle: "data", throwOnError: true },
+    })
+  })
+
+  test("passes directory and workspace scope through the chosen async delivery path", async () => {
+    const rawCalls: unknown[] = []
+    const publicCalls: unknown[] = []
+    const adapter = new OpenCodeAdapter(
+      {
+        _client: {
+          async post(options: unknown) {
+            rawCalls.push(options)
+            throw new Error("raw prompt_async unavailable")
+          },
+        },
+        session: {},
+      },
+      {
+        workspaceID: "workspace-default",
+        sdkClient: {
+          session: {
+            async promptAsync(args: unknown, options?: unknown) {
+              publicCalls.push({ args, options })
+              return { ok: true }
+            },
+          },
+        },
+      },
+    )
+
+    expect(
+      await adapter.sendSessionMessageAsync("ses_scope", "hello", {
+        directory: "/tmp/project",
+        workspaceID: "workspace-override",
+      }),
+    ).toEqual({ ok: true })
+
+    // Raw attempt carries the scope query before it throws.
+    expect(rawCalls[0]).toMatchObject({
+      url: "/session/ses_scope/prompt_async",
+      query: { directory: "/tmp/project", workspace: "workspace-override" },
+    })
+    // Chosen public path carries the scope on its params.
+    expect(publicCalls[0]).toMatchObject({
+      args: { sessionID: "ses_scope", directory: "/tmp/project", workspace: "workspace-override" },
+    })
+  })
+
   test("uses experimental session listing for unscoped global discovery when an sdk client is available", async () => {
     const calls: Array<{ method: string; args: unknown; options?: unknown }> = []
     const adapter = new OpenCodeAdapter(

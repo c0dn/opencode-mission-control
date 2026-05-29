@@ -372,6 +372,59 @@ export class OpenCodeAdapter {
     return { ok: false }
   }
 
+  async sendSessionMessageAsync(
+    sessionID: string,
+    text: string,
+    options: { directory?: string; workspaceID?: string } = {},
+  ): Promise<{ ok: boolean }> {
+    const resolvedDirectory = this.resolveDirectory(options.directory)
+    const workspaceID = options.workspaceID ?? this.options.workspaceID
+    const parts = [{ type: "text", text }]
+    const attempts: Array<() => Promise<void>> = []
+
+    if (getRawClient(this.client)) {
+      attempts.push(async () => {
+        await rawRequest(this.client, {
+          method: "POST",
+          path: `/session/${encodeURIComponent(sessionID)}/prompt_async`,
+          query: scopeQuery(resolvedDirectory, workspaceID),
+          body: { parts },
+          throwOnError: true,
+        })
+      })
+    }
+
+    if (this.publicClient?.session?.promptAsync) {
+      attempts.push(async () => {
+        await this.publicClient.session.promptAsync(this.scopedParams({ sessionID, parts }, resolvedDirectory, workspaceID), {
+          responseStyle: "data",
+          throwOnError: true,
+        })
+      })
+    }
+
+    if (this.client?.session?.promptAsync) {
+      attempts.push(async () => {
+        await this.client.session.promptAsync(withScopeQuery({ path: { id: sessionID }, parts }, resolvedDirectory, workspaceID))
+      })
+    }
+
+    for (const attempt of attempts) {
+      try {
+        await attempt()
+        return { ok: true }
+      } catch (error) {
+        await this.debug("session prompt_async delivery failed", {
+          sessionID,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+
+    await this.debug("session prompt_async delivery unavailable", { sessionID })
+    return { ok: false }
+  }
+
   private async writeDebugEntry(level: "debug" | "info" | "warn" | "error", message: string, extra?: UnknownRecord) {
     await this.debugLogWriter.write(level, message, extra)
   }

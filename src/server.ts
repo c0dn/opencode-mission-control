@@ -175,6 +175,7 @@ export class MissionControlServer {
         sessionTail: exposesSessionTools,
         sessionTree: exposesSessionTools,
         sessionAbort: exposesSessionTools,
+        sessionSend: exposesSessionTools,
         indexedRetrieval: exposesSessionTools && this.config.search.lexicalEnabled,
         semanticRetrieval: exposesSessionTools && (this.semanticProvider?.isAvailable() ?? false),
       },
@@ -212,6 +213,7 @@ export class MissionControlServer {
         sessionTail: true,
         sessionTree: true,
         sessionAbort: true,
+        sessionSend: true,
         sessionObserve: true,
         sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
         terminalTools: true,
@@ -291,6 +293,14 @@ export class MissionControlServer {
     return this.sessionService.abortSession(adapter, sessionId)
   }
 
+  async sendSessionMessageAsync(targetSessionId: string, text: string, fromSessionId?: string) {
+    return this.sessionService.sendMessageAsync(this.adapter, targetSessionId, text, fromSessionId)
+  }
+
+  async sendSessionMessageInterrupt(targetSessionId: string, text: string, fromSessionId?: string) {
+    return this.sessionService.sendMessageInterrupt(this.adapter, targetSessionId, text, fromSessionId)
+  }
+
   async observeSession(
     sessionId: string,
     options: {
@@ -330,6 +340,24 @@ export class MissionControlServer {
 
   async cancelTerminal(id: string, options: { closePane?: boolean; ctrlC?: boolean }) {
     return this.terminalRegistry.cancel(id, options)
+  }
+
+  async listTerminalPanes(args: { session?: string; sessionId?: string; all?: boolean }) {
+    return this.terminalRegistry.listPanesLive(args)
+  }
+
+  async captureTerminalPane(args: {
+    session?: string
+    sessionId?: string
+    paneId?: string
+    full?: boolean
+    ansi?: boolean
+  }) {
+    return this.terminalRegistry.capturePaneLive(args)
+  }
+
+  async listZellijSessions() {
+    return this.terminalRegistry.listZellijSessions()
   }
 
   compactionContext(sessionId: string) {
