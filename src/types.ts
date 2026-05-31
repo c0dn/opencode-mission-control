@@ -98,10 +98,6 @@ export interface MissionControlCapabilityMatrix {
     liveEvents: boolean
     recentBuffer: boolean
   }
-  terminals?: {
-    zellij: boolean
-    syntheticNotifications: boolean
-  }
 }
 
 export interface MissionControlEventRecord {
@@ -149,7 +145,6 @@ export interface MissionControlStatus {
     sessionSend: boolean
     sessionObserve: boolean
     sessionSearch: boolean
-    terminalTools?: boolean
   }
   config: MissionControlConfig
   counters: {

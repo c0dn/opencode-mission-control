@@ -41,7 +41,7 @@ Cache and index paths are partitioned by a short SHA-1 workspace key. Without an
 
 ## Configuration invariants
 
-Mission Control exposes its session, search, observe, and Zellij terminal tools unconditionally. The retired `tools.surface` option is ignored when present for compatibility with older configs.
+Mission Control exposes its session, search, and observe tools unconditionally. The retired `tools.surface` option is ignored when present for compatibility with older configs.
 
 ## Transcript inspection
 
@@ -61,6 +61,16 @@ Mission Control exposes its session, search, observe, and Zellij terminal tools 
 - The tool is intended primarily for cancelling background subagents by subagent session ID.
 - Foreground subagents can block the parent tool loop, so cancellation is most reliable when another active tool loop can issue the abort request.
 - Mission Control does not mutate OpenCode storage directly when aborting; the only mutation is the public OpenCode API call.
+
+## Inter-session messaging
+
+- `mc_session_send_async` and `mc_session_send_interrupt` deliver a message from one session into another running session through OpenCode's public `POST /session/{sessionID}/prompt_async` API.
+- `prompt_async` creates a real, reply-generating user message and returns immediately; OpenCode serializes one runner per session, so a queued prompt is processed at the next loop boundary, not mid-token.
+- `mc_session_send_async` queues the message only; the target acts on it at its next loop boundary.
+- `mc_session_send_interrupt` issues a best-effort `POST /session/{sessionID}/abort` first, then queues the message, so it is picked up immediately because aborting frees the runner. The abort is wrapped in try/catch and delivery still proceeds if the abort fails.
+- The delivered message is wrapped in an `<inter_agent_message from="...">` envelope carrying the sender session ID so the target can attribute it.
+- These tools are intended primarily for messaging background subagents by subagent session ID; interrupting a foreground session you depend on cancels its current generation.
+- Mission Control does not mutate OpenCode storage directly when sending; the only mutations are the public prompt and abort API calls.
 
 ## Subagent IDs during compaction
 
@@ -92,19 +102,6 @@ Important mappings:
 | `todo.updated` | record the event without changing session running state |
 
 `mc_session_events` is backed by an in-memory recent-event buffer. It is a live and recent view, not a full audit log.
-
-## Zellij terminal model
-
-Mission Control terminal tools use Zellij as the terminal backend. The plugin creates or reuses a background Zellij session for the owning OpenCode session and opens command panes inside it.
-
-Rules:
-
-1. Mission Control invokes the `zellij` CLI with argv arrays; it does not own terminal child processes directly.
-2. A terminal record stores both Zellij session name and pane id. Pane ids are treated as session-local.
-3. Terminal registry state is in-memory and scoped to the running plugin server.
-4. Known running terminals are polled for completion/cancel/error state; there is no explicit wait tool.
-5. Completion/cancel/error notifications are injected into the owning OpenCode session as best-effort synthetic text using `<terminal id="..." state="completed|cancelled|error">`.
-6. Zellij panes are not closed by default so scrollback remains available.
 
 ## Persistence model
 
@@ -160,4 +157,3 @@ Explicitly unsupported:
 - silent permission approval
 - silent question answering
 - hidden mutation of OpenCode internals
-- a Mission Control wait API for terminals

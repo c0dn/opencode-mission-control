@@ -96,41 +96,6 @@ describe("MissionControlServer", () => {
     expect((status.capabilities as any).jobs).toBeUndefined()
   })
 
-  test("status reports terminal tools available for legacy inspect-only config", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
-    tempDirs.push(directory)
-
-    const server = new MissionControlServer(
-      {
-        client: {
-          session: {},
-          app: {
-            async log() {
-              return undefined
-            },
-          },
-        },
-        directory,
-        worktree: directory,
-      },
-      {
-        ...DEFAULT_CONFIG,
-        tools: {
-          surface: "inspect-only",
-        },
-      },
-      { search: {} },
-    )
-
-    const status = await server.status()
-
-    expect(status.implemented.terminalTools).toBe(true)
-    expect(status.capabilities.terminals).toEqual({
-      zellij: true,
-      syntheticNotifications: true,
-    })
-  })
-
   test("status reports the most recently built scope-specific index", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
     const otherDirectory = await mkdtemp(join(tmpdir(), "mission-control-server-"))

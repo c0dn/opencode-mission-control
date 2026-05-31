@@ -8,8 +8,6 @@ import { createSemanticProvider } from "./semantic-provider.js"
 import { extractSessionID, extractWorkspaceID } from "./session-extractors.js"
 import { MissionControlSessionService } from "./session-service.js"
 import { MissionControlSourceDB } from "./source-db.js"
-import { MissionControlTerminalRegistry, type TerminalStatus } from "./terminals/registry.js"
-import { ZellijAdapter } from "./terminals/zellij.js"
 import type {
   MissionControlCapabilityMatrix,
   MissionControlConfig,
@@ -52,7 +50,6 @@ export class MissionControlServer {
   private readonly sourceDB: MissionControlSourceDB
   private readonly searchService: MissionControlSearchService
   private readonly sessionService: MissionControlSessionService
-  private terminalRegistry: MissionControlTerminalRegistry
   private readonly workspaceID?: string
   private readonly workspaceKey?: string
   private storeKey?: string
@@ -79,7 +76,6 @@ export class MissionControlServer {
     this.sourceDB = new MissionControlSourceDB()
     this.searchService = new MissionControlSearchService(this.sourceDB, this.runtimeState)
     this.sessionService = new MissionControlSessionService(this.runtimeState, this.sourceDB)
-    this.terminalRegistry = new MissionControlTerminalRegistry(new ZellijAdapter(), this.adapter)
   }
 
   static async fromContext(context: PluginContext, config: MissionControlConfig, secrets: MissionControlRuntimeSecrets) {
@@ -126,12 +122,6 @@ export class MissionControlServer {
     })
     this.semanticProvider = createSemanticProvider(config, secrets)
     this.runtimeState.setBufferSize(config.observe.eventBufferSize)
-    if (this.disposed) {
-      this.terminalRegistry = new MissionControlTerminalRegistry(new ZellijAdapter(), this.adapter)
-      this.disposed = false
-    } else {
-      this.terminalRegistry.setOpenCodeAdapter(this.adapter)
-    }
   }
 
   async start() {
@@ -157,7 +147,6 @@ export class MissionControlServer {
 
   async dispose() {
     this.disposed = true
-    this.terminalRegistry.dispose()
     if (this.storeKey && getServerStore().get(this.storeKey) === this) {
       getServerStore().delete(this.storeKey)
     }
@@ -165,7 +154,6 @@ export class MissionControlServer {
 
   capabilities(): MissionControlCapabilityMatrix {
     const exposesSessionTools = true
-    const exposesTerminalTools = true
 
     return {
       search: {
@@ -182,10 +170,6 @@ export class MissionControlServer {
       observe: {
         liveEvents: exposesSessionTools,
         recentBuffer: exposesSessionTools,
-      },
-      terminals: {
-        zellij: exposesTerminalTools,
-        syntheticNotifications: exposesTerminalTools,
       },
     }
   }
@@ -216,7 +200,6 @@ export class MissionControlServer {
         sessionSend: true,
         sessionObserve: true,
         sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
-        terminalTools: true,
       },
       config: this.config,
       counters: this.runtimeState.counters(),
@@ -316,48 +299,6 @@ export class MissionControlServer {
     const adapter = this.adapter
     const rootDir = this.context.directory ?? this.context.worktree ?? "."
     return this.searchService.search(adapter, this.config, rootDir, args, this.semanticProvider, this.workspaceID, this.workspaceKey)
-  }
-
-  async startTerminal(args: import("./terminals/registry.js").TerminalStartArgs) {
-    return this.terminalRegistry.start(args)
-  }
-
-  async listTerminals(filters: { sessionId?: string; status?: TerminalStatus }) {
-    return { terminals: this.terminalRegistry.list(filters) }
-  }
-
-  async getTerminal(id: string) {
-    return this.terminalRegistry.get(id)
-  }
-
-  async readTerminal(id: string, options: { offset?: number; limit?: number; ansi?: boolean }) {
-    return this.terminalRegistry.read(id, options)
-  }
-
-  async sendTerminal(id: string, args: { text?: string; keys?: string[] }) {
-    return this.terminalRegistry.send(id, args)
-  }
-
-  async cancelTerminal(id: string, options: { closePane?: boolean; ctrlC?: boolean }) {
-    return this.terminalRegistry.cancel(id, options)
-  }
-
-  async listTerminalPanes(args: { session?: string; sessionId?: string; all?: boolean }) {
-    return this.terminalRegistry.listPanesLive(args)
-  }
-
-  async captureTerminalPane(args: {
-    session?: string
-    sessionId?: string
-    paneId?: string
-    full?: boolean
-    ansi?: boolean
-  }) {
-    return this.terminalRegistry.capturePaneLive(args)
-  }
-
-  async listZellijSessions() {
-    return this.terminalRegistry.listZellijSessions()
   }
 
   compactionContext(sessionId: string) {
