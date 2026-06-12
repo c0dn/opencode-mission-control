@@ -92,4 +92,4 @@ When an ambient workspace ID is present, Mission Control also partitions the cac
 - This tool indexes data exposed by the OpenCode session API, not every row in `opencode.db`.
 - `scope: "global"` still depends on what the session API returns.
 - The cache is reused until Mission Control decides it is stale and rebuilds it.
-- Legacy JSON search-index sidecars may be imported when present, but the active cache is SQLite-backed.
+- Indexes with a `version` field that does not match the current internal version are discarded and rebuilt entirely.

@@ -72,8 +72,9 @@ A transcript result containing:
 - `withChildren: true` merges child-session transcript content into one result.
 - `beforeMessageId` is applied before transcript normalization/filtering, so it remains a hard boundary even if the boundary message itself would be hidden by `withToolOutputs: false`.
 - `limit` and `offset` are applied after the `beforeMessageId` boundary is enforced.
-- Limited reads without `beforeMessageId` now use raw session-message paging when the runtime exposes the raw OpenCode client.
-- On that raw paged path, Mission Control fetches only enough recent message pages to satisfy the requested page plus one older-entry probe for `hasMore`.
-- The raw paged path does not have an upstream total-count API, so `totalEntriesExact` becomes `false` whenever `hasMore` is `true` on that path.
-- Reads with `beforeMessageId`, or runtimes that do not expose the raw OpenCode request client, still fall back to the exact full-history path.
+- All message reads use the V2 session API. There is no classic fallback; servers older than the V2 routes are not supported.
+- Limited reads without `beforeMessageId` use V2 cursor-based paging. The first page is fetched with `order: "desc"` (newest first); follow-up pages use the opaque `cursor.next` value without an explicit order parameter.
+- Each page is reversed to ascending order before processing so newest-relative offset/limit semantics are preserved across all consumers.
+- Anchored reads (`beforeMessageId`) and unlimited reads use the V2 full-history path: paginate `order: "asc"` to completion following `cursor.next`.
+- The V2 messages API does not expose a total-count field, so `totalEntriesExact` becomes `false` whenever `hasMore` is `true`.
 - If the session cannot be resolved or the runtime cannot load messages, the tool returns an error.

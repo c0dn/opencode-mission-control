@@ -41,10 +41,9 @@ mc_session_tail({
 
 ## Caveats
 
-- This omits raw tool outputs and step markers.
-- This omits raw tool outputs, reasoning parts, and step markers.
-- Limited tails now use raw session-message paging when the runtime exposes the raw OpenCode client.
-- On that raw paged path, Mission Control fetches only enough recent message pages to satisfy the requested page plus one older-entry probe for `hasMore`.
-- The raw paged path does not have an upstream total-count API, so `totalEntriesExact` becomes `false` whenever `hasMore` is `true` on that path.
-- Tails on runtimes without the raw OpenCode request client still fall back to the exact full-history path.
+- This omits tool outputs, reasoning, step markers, `agent-switched`, and `model-switched` entries. Compaction summaries are included.
+- All message reads use the V2 session API. There is no classic fallback.
+- Limited tails use V2 cursor-based paging. The first page is fetched with `order: "desc"` (newest first); follow-up pages use the opaque `cursor.next` value.
+- Each page is reversed to ascending order before processing so newest-relative offset/limit semantics are preserved.
+- The V2 messages API does not expose a total-count field, so `totalEntriesExact` becomes `false` whenever `hasMore` is `true`.
 - Prefer this over `mc_session_read` when you only need the recent human-readable conversation.
