@@ -110,6 +110,11 @@ export class MissionControlSessionService {
       return fail("SessionNotFound", `Session '${targetSessionId}' was not found.`)
     }
 
+    const parentSessionId = this.getParentSessionId(targetSessionId, resolved.session)
+    if (parentSessionId) {
+      return rejectChildSessionPrompt(targetSessionId, parentSessionId)
+    }
+
     const envelope = buildInterAgentMessage({ fromSessionId, text })
     const delivery = await adapter.sendSessionMessageAsync(targetSessionId, envelope, {
       directory: resolved.directory,
@@ -155,6 +160,11 @@ export class MissionControlSessionService {
         )
       }
       return fail("SessionNotFound", `Session '${targetSessionId}' was not found.`)
+    }
+
+    const parentSessionId = this.getParentSessionId(targetSessionId, resolved.session)
+    if (parentSessionId) {
+      return rejectChildSessionPrompt(targetSessionId, parentSessionId)
     }
 
     let aborted: boolean | undefined
@@ -267,12 +277,10 @@ export class MissionControlSessionService {
         isEligible: (record) => hasVisibleTranscriptContent(record.message, options.withToolOutputs ?? false),
       })
       if (paged === undefined) {
-        await adapter.debug("readSession falling back to exact full-history transcript load", {
+        await adapter.debug("readSession falling back to full-history transcript load", {
           sessionId,
-          withChildren: Boolean(options.withChildren),
           offset: options.offset,
           limit: options.limit,
-          withToolOutputs: options.withToolOutputs,
         })
       } else if (!paged.ok) {
         return paged
@@ -284,14 +292,14 @@ export class MissionControlSessionService {
         return ok({
           sessionId,
           entries,
-        includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
-        offset: paged.data.offset,
-        hasMore: paged.data.hasMore,
-        nextOffset: paged.data.nextOffset,
-        totalEntries: paged.data.totalEntries,
-        totalEntriesExact: paged.data.totalEntriesExact,
-      })
-    }
+          includedChildSessionIds: relatedSessions.data.slice(1).map((session) => session.sessionID),
+          offset: paged.data.offset,
+          hasMore: paged.data.hasMore,
+          nextOffset: paged.data.nextOffset,
+          totalEntries: paged.data.totalEntries,
+          totalEntriesExact: paged.data.totalEntriesExact,
+        })
+      }
     }
 
     const messageGroups = await this.loadMessageGroups(adapter, sessionId, relatedSessions.data)
@@ -369,9 +377,8 @@ export class MissionControlSessionService {
         isEligible: (record) => Boolean(extractTailText(record.message)),
       })
       if (paged === undefined) {
-        await adapter.debug("tailSession falling back to exact full-history transcript load", {
+        await adapter.debug("tailSession falling back to full-history transcript load", {
           sessionId,
-          withChildren: Boolean(options.withChildren),
           offset: options.offset,
           limit: options.limit,
         })
@@ -462,13 +469,13 @@ export class MissionControlSessionService {
     },
   ): Promise<
     | ToolResult<{
-      entries: SessionMessageRecord[]
-      offset: number
-      hasMore: boolean
-      nextOffset?: number
-      totalEntries: number
-      totalEntriesExact: boolean
-    }>
+        entries: SessionMessageRecord[]
+        offset: number
+        hasMore: boolean
+        nextOffset?: number
+        totalEntries: number
+        totalEntriesExact: boolean
+      }>
     | undefined
   > {
     const offset = Math.max(0, Math.trunc(options.offset ?? 0))
@@ -681,6 +688,10 @@ export class MissionControlSessionService {
     }
   }
 
+  private getParentSessionId(sessionId: string, session: unknown) {
+    return extractParentSessionID(session) ?? this.state.metadataForSession(sessionId)?.parentSessionId
+  }
+
   private async buildTree(
     adapter: OpenCodeAdapter,
     sessionId: string,
@@ -843,6 +854,13 @@ const escapeXmlText = (value: string) => value.replace(/&/g, "&amp;").replace(/<
 
 const escapeXmlAttribute = (value: string) => escapeXmlText(value).replace(/"/g, "&quot;")
 
+const rejectChildSessionPrompt = (targetSessionId: string, parentSessionId: string) =>
+  fail(
+    "SubagentPromptRejected",
+    `Session '${targetSessionId}' is a child/subagent session (parent '${parentSessionId}') and Mission Control refuses to prompt it directly.`,
+    `Send the message to parent session '${parentSessionId}' if you intend to steer orchestration, or use mc_session_abort({ sessionId: '${targetSessionId}' }) to stop the child session.`,
+  )
+
 const buildInterAgentMessage = ({ fromSessionId, text }: { fromSessionId?: string; text: string }) =>
   `<inter_agent_message from="${escapeXmlAttribute(fromSessionId ?? "unknown")}">\n${escapeXmlText(text)}\n</inter_agent_message>`
 
@@ -937,7 +955,7 @@ const loadNextPagedSessionChunk = async (
       directory: state.directory,
       workspaceID: state.workspaceID,
       limit: pageSize,
-      before: state.nextCursor,
+      cursor: state.nextCursor,
     })
     const messages = Array.isArray(page.messages) ? page.messages : []
     const orderStart = state.initialized ? state.oldestMessageOrder - messages.length : 0

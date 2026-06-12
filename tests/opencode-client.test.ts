@@ -313,8 +313,14 @@ describe("OpenCodeAdapter session APIs", () => {
           if (options.url === "/session/raw-session/children") {
             return { data: [{ id: "child-session" }], response: new Response("[]") }
           }
-          if (options.url === "/session/raw-session/message") {
-            return { data: [{ info: { id: "msg-1" }, parts: [] }], response: new Response("[]") }
+          // V2 path: /api/session/{id}/message returns {items, cursor}
+          if (options.url === "/api/session/raw-session/message") {
+            return {
+              data: {
+                items: [{ id: "msg-1", type: "user", time: { created: 1 }, text: "hello" }],
+                cursor: {},
+              },
+            }
           }
           throw new Error(`Unexpected raw url ${options.url}`)
         },
@@ -324,18 +330,26 @@ describe("OpenCodeAdapter session APIs", () => {
 
     expect(await adapter.getSession("raw-session", "/tmp/project")).toEqual({ id: "raw-session" })
     expect(await adapter.getSessionChildren("raw-session", "/tmp/project")).toEqual([{ id: "child-session" }])
-    expect(await adapter.getSessionMessages("raw-session", "/tmp/project")).toEqual([{ info: { id: "msg-1" }, parts: [] }])
-    expect(calls).toEqual([
-      { method: "get", options: { url: "/session/raw-session", query: { directory: "/tmp/project" }, throwOnError: true } },
-      {
-        method: "get",
-        options: { url: "/session/raw-session/children", query: { directory: "/tmp/project" }, throwOnError: true },
+
+    // getSessionMessages now uses V2 and projects: raw V2 item → {info, parts}
+    const messages = await adapter.getSessionMessages("raw-session", "/tmp/project")
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.info?.id).toBe("msg-1")
+    expect(messages[0]?.info?.role).toBe("user")
+    expect(messages[0]?.parts[0]?.type).toBe("text")
+    expect(messages[0]?.parts[0]?.text).toBe("hello")
+
+    expect(calls[0]).toEqual({ method: "get", options: { url: "/session/raw-session", query: { directory: "/tmp/project" }, throwOnError: true } })
+    expect(calls[1]).toEqual({ method: "get", options: { url: "/session/raw-session/children", query: { directory: "/tmp/project" }, throwOnError: true } })
+    // V2 message fetch: first page uses order:asc (full read); subsequent only if cursor exists
+    expect(calls[2]).toMatchObject({
+      method: "get",
+      options: {
+        url: "/api/session/raw-session/message",
+        query: expect.objectContaining({ directory: "/tmp/project", order: "asc", limit: 100 }),
+        throwOnError: true,
       },
-      {
-        method: "get",
-        options: { url: "/session/raw-session/message", query: { directory: "/tmp/project" }, throwOnError: true },
-      },
-    ])
+    })
   })
 
   test("aborts sessions through the injected raw client with scope query", async () => {
@@ -372,42 +386,70 @@ describe("OpenCodeAdapter session APIs", () => {
     ])
   })
 
-  test("preserves raw session message paging cursor from response headers", async () => {
+  test("uses V2 /api/session endpoint for paging and returns projected messages with cursor", async () => {
     const calls: Array<{ method: string; options: unknown }> = []
+    const v2Item = {
+      id: "msg-1",
+      type: "user",
+      time: { created: 1 },
+      text: "hello",
+    }
     const adapter = new OpenCodeAdapter({
       _client: {
         async get(options: unknown) {
           calls.push({ method: "get", options })
           return {
-            data: [{ info: { id: "msg-1" }, parts: [] }],
-            response: new Response("[]", { headers: { "x-next-cursor": "cursor-2" } }),
+            data: { items: [v2Item], cursor: { next: "cursor-2" } },
           }
         },
       },
       session: {},
     })
 
-    expect(
-      await adapter.getSessionMessagePage("raw-session", {
-        directory: "/tmp/project",
-        limit: 1,
-        before: "cursor-1",
-      }),
-    ).toEqual({
-      messages: [{ info: { id: "msg-1" }, parts: [] }],
-      nextCursor: "cursor-2",
+    const result = await adapter.getSessionMessagePage("raw-session", {
+      directory: "/tmp/project",
+      limit: 1,
+      cursor: "cursor-1",
     })
+
+    // cursor-1 is a follow-up page (has cursor) → no order param; items reversed to ascending
+    expect(result.nextCursor).toBe("cursor-2")
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0]?.info?.id).toBe("msg-1")
+    expect(result.messages[0]?.info?.role).toBe("user")
     expect(calls).toEqual([
       {
         method: "get",
         options: {
-          url: "/session/raw-session/message",
-          query: { directory: "/tmp/project", limit: 1, before: "cursor-1" },
-          responseStyle: "fields",
+          url: "/api/session/raw-session/message",
+          query: { directory: "/tmp/project", limit: 1, cursor: "cursor-1" },
           throwOnError: true,
         },
       },
     ])
+  })
+
+  test("sends order:desc on the first page request (no cursor) and omits it on follow-ups", async () => {
+    const calls: Array<{ method: string; options: unknown }> = []
+    const adapter = new OpenCodeAdapter({
+      _client: {
+        async get(options: unknown) {
+          calls.push({ method: "get", options })
+          return { data: { items: [], cursor: {} } }
+        },
+      },
+      session: {},
+    })
+
+    // First page — no cursor
+    await adapter.getSessionMessagePage("s1", { limit: 5 })
+    expect((calls[0] as any).options.query).toMatchObject({ order: "desc", limit: 5 })
+    expect((calls[0] as any).options.query.cursor).toBeUndefined()
+
+    // Follow-up page — has cursor, no order
+    await adapter.getSessionMessagePage("s1", { limit: 5, cursor: "tok-1" })
+    expect((calls[1] as any).options.query.order).toBeUndefined()
+    expect((calls[1] as any).options.query.cursor).toBe("tok-1")
   })
 
   test("prefers raw session listing over a stale serverUrl and public sdk client", async () => {
@@ -444,7 +486,7 @@ describe("OpenCodeAdapter session APIs", () => {
     ])
   })
 
-  test("constructs a real v2 sdk client from serverUrl and uses public session HTTP endpoints", async () => {
+  test("constructs a real v2 sdk client from serverUrl and uses V2 /api/session endpoint", async () => {
     const requests: Array<{ method: string; pathname: string; search: string }> = []
     const server = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://127.0.0.1")
@@ -454,18 +496,20 @@ describe("OpenCodeAdapter session APIs", () => {
         search: url.search,
       })
 
-      if (url.pathname === "/session/live-session/message") {
-        res.writeHead(200, {
-          "content-type": "application/json",
-          "x-next-cursor": "cursor-2",
-        })
+      if (url.pathname === "/api/session/live-session/message") {
+        res.writeHead(200, { "content-type": "application/json" })
         res.end(
-          JSON.stringify([
-            {
-              info: { id: "msg-1", role: "assistant", time: { created: 1 } },
-              parts: [{ id: "part-1", type: "text", text: "live message" }],
-            },
-          ]),
+          JSON.stringify({
+            items: [
+              {
+                id: "msg-1",
+                type: "assistant",
+                time: { created: 1 },
+                content: [{ type: "text", text: "live message" }],
+              },
+            ],
+            cursor: { next: "cursor-2" },
+          }),
         )
         return
       }
@@ -493,24 +537,19 @@ describe("OpenCodeAdapter session APIs", () => {
         },
       )
 
-      expect(
-        await adapter.getSessionMessagePage("live-session", {
-          limit: 2,
-        }),
-      ).toEqual({
-        messages: [
-          {
-            info: { id: "msg-1", role: "assistant", time: { created: 1 } },
-            parts: [{ id: "part-1", type: "text", text: "live message" }],
-          },
-        ],
-        nextCursor: "cursor-2",
-      })
+      const result = await adapter.getSessionMessagePage("live-session", { limit: 2 })
+
+      // Items returned desc by server, reversed to asc by adapter
+      expect(result.nextCursor).toBe("cursor-2")
+      expect(result.messages).toHaveLength(1)
+      expect(result.messages[0]?.info?.id).toBe("msg-1")
+      expect(result.messages[0]?.info?.role).toBe("assistant")
+      expect(result.messages[0]?.parts[0]?.text).toBe("live message")
 
       expect(requests).toHaveLength(1)
       expect(requests[0]).toMatchObject({
         method: "GET",
-        pathname: "/session/live-session/message",
+        pathname: "/api/session/live-session/message",
       })
       expect(requests[0]?.search).toContain("limit=2")
       expect(requests[0]?.search).toContain("directory=%2Ftmp%2Fproject")

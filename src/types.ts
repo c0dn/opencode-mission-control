@@ -14,6 +14,7 @@ export type MissionControlErrorCode =
   | "GlobalSessionDiscoveryUnavailable"
   | "IndexScopeMismatch"
   | "CurrentSessionUnavailable"
+  | "SubagentPromptRejected"
   | "SessionLookupUnavailable"
   | "NotImplemented"
 
@@ -57,7 +58,7 @@ export interface SessionChunk {
   partID?: string
   parentSessionID?: string
   role: "user" | "assistant" | "system" | "tool" | "unknown"
-  partType: "text" | "tool" | "reasoning" | "step-start" | "step-finish" | "unknown"
+  partType: "text" | "tool" | "reasoning" | "step-start" | "step-finish" | "agent-switched" | "model-switched" | "compaction" | "unknown"
   agent?: string
   toolName?: string
   text: string

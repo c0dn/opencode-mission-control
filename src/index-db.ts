@@ -31,7 +31,7 @@ export interface MissionControlIndexDBOptions {
 }
 
 export class MissionControlIndexDB {
-  private static readonly VERSION = 6
+  private static readonly VERSION = 7
   private readonly sqliteByPath = new Map<string, MissionControlSqliteDatabase>()
   private readonly storeByPath = new Map<string, SqliteSearchIndexStore>()
 
@@ -358,7 +358,7 @@ export class MissionControlIndexDB {
       const path = resolveScopedIndexPath(this.rootDir, this.configuredIndexPath, scope, this.options.workspaceKey)
       const content = await readFile(path, "utf8")
       const parsed = JSON.parse(content) as SearchIndexDocument
-      if (![5, MissionControlIndexDB.VERSION].includes(parsed.version) || parsed.discovery?.scope !== scope) {
+      if (parsed.version !== MissionControlIndexDB.VERSION || parsed.discovery?.scope !== scope) {
         return undefined
       }
 

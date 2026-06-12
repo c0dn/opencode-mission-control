@@ -44,6 +44,26 @@ export class MissionControlSearchService {
     workspaceID?: string,
     workspaceKey?: string,
   ): Promise<ToolResult<SessionSearchResult>> {
+    try {
+      return await this.searchInner(adapter, config, rootDir, args, semanticProvider, workspaceID, workspaceKey)
+    } catch (error) {
+      return fail(
+        "SearchIndexUnavailable",
+        "Mission Control search encountered an unexpected error.",
+        error instanceof Error ? error.message : "Retry the search after the runtime settles.",
+      )
+    }
+  }
+
+  private async searchInner(
+    adapter: OpenCodeAdapter,
+    config: MissionControlConfig,
+    rootDir: string,
+    args: SearchExecutionArgs,
+    semanticProvider?: SemanticEmbeddingProvider,
+    workspaceID?: string,
+    workspaceKey?: string,
+  ): Promise<ToolResult<SessionSearchResult>> {
     const useGlobalScope = args.scope === "global"
     const discovery: SearchIndexDocument["discovery"] = {
       scope: useGlobalScope ? "global_unscoped" : "current_directory",

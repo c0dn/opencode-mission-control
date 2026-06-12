@@ -51,7 +51,14 @@ mc_session_send_interrupt({
 - OpenCode serializes one runner per session: a queued prompt is processed at the next loop boundary, not mid-token.
   - `async` means queue only. The target picks the message up at its next loop boundary.
   - `interrupt` aborts first, then queues, so the message is acted on immediately because aborting frees the runner.
-- `mc_session_send_interrupt` interrupts any in-flight generation or tool call on the target. It works best for background subagents rather than a foreground session you depend on.
+- `mc_session_send_interrupt` interrupts any in-flight generation or tool call on the target.
+
+## Child/subagent session guard
+
+- Mission Control refuses to deliver `mc_session_send_*` prompts directly to child/subagent sessions.
+- Why: `prompt_async` creates a real user message, and prompting a child session can bounce back into orchestration or trigger manager relaunch loops.
+- If you need to stop a child/subagent, use `mc_session_abort({ sessionId })`.
+- If you need to influence orchestration, send the message to the parent session intentionally instead.
 
 ## Inter-agent message envelope
 
@@ -72,6 +79,7 @@ These tools do not return the target's reply. Pair them with `mc_session_tail({ 
 ## Caveats
 
 - Delivery only confirms the prompt was accepted by the runtime; it does not confirm the target acted on it.
+- Child/subagent targets are rejected with `SubagentPromptRejected` before any prompt or abort request is sent.
 - If the current runtime cannot discover the target session scope, these tools return `GlobalSessionDiscoveryUnavailable`.
 - A failed delivery returns `SessionLookupUnavailable`; an unknown target returns `SessionNotFound`.
 - Mission Control does not mutate OpenCode storage directly; it only sends the public prompt (and, for interrupt, the public abort) request.

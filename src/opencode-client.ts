@@ -3,6 +3,7 @@ import { createOpencodeClient as createV2OpencodeClient } from "@opencode-ai/sdk
 import { DebugLogWriter, type OpenCodeAdapterOptions } from "./opencode/debug-log.js"
 import { getRawClient, rawRequest, scopeQuery, unwrap, withScopeQuery } from "./opencode/raw-client.js"
 import { GlobalSessionDiscoveryError, resolveSession } from "./opencode/session-resolution.js"
+import { projectV2Message } from "./opencode/v2-message-projection.js"
 
 export { GlobalSessionDiscoveryError } from "./opencode/session-resolution.js"
 
@@ -14,7 +15,7 @@ export interface SessionMessagePage {
 }
 
 export class SessionMessagePagingUnsupportedError extends Error {
-  constructor(message = "OpenCode session-message paging is unavailable from the raw client response") {
+  constructor(message = "V2 session-message paging is unavailable from this OpenCode runtime") {
     super(message)
     this.name = "SessionMessagePagingUnsupportedError"
   }
@@ -43,7 +44,7 @@ export class OpenCodeAdapter {
   }
 
   supportsSessionMessagePaging() {
-    return Boolean(getRawClient(this.client) || this.publicClient?.session?.messages)
+    return Boolean(getRawClient(this.client) || this.publicClient?.v2?.session?.messages)
   }
 
   async log(level: "debug" | "info" | "warn" | "error", message: string, extra?: UnknownRecord) {
@@ -103,15 +104,8 @@ export class OpenCodeAdapter {
   async listSessions(options: { global?: boolean; directory?: string; workspaceID?: string } = {}) {
     const workspaceID = options.workspaceID ?? this.options.workspaceID
     try {
-      if (getRawClient(this.client)) {
-        if (options.global) {
-          return (await rawRequest(this.client, {
-            path: "/experimental/session",
-            query: this.globalParams(workspaceID),
-            throwOnError: true,
-          })) as any[]
-        }
-
+      // Local: raw client path works reliably in-process
+      if (!options.global && getRawClient(this.client)) {
         return (await rawRequest(this.client, {
           path: "/session",
           query: scopeQuery(this.resolveDirectory(options.directory), workspaceID),
@@ -119,24 +113,45 @@ export class OpenCodeAdapter {
         })) as any[]
       }
 
+      // Global raw path can fail in some runtimes — try it but fall through on error
+      if (options.global && getRawClient(this.client)) {
+        try {
+          return (await rawRequest(this.client, {
+            path: "/experimental/session",
+            query: this.globalParams(workspaceID),
+            throwOnError: true,
+          })) as any[]
+        } catch {
+          // raw /experimental/session unreachable — fall through to publicClient / classic
+        }
+      }
+
       if (this.publicClient?.session?.list) {
         if (options.global) {
+          try {
+            return unwrap(
+              await this.publicClient.experimental.session.list(this.globalParams(workspaceID), {
+                responseStyle: "data",
+                throwOnError: true,
+              }),
+            ) as any[]
+          } catch (err) {
+            await this.debug("listSessions publicClient global fallthrough", {
+              error: err instanceof Error ? err.message : String(err),
+            })
+            // experimental endpoint unreachable — fall through to classic
+          }
+        } else {
           return unwrap(
-            await this.publicClient.experimental.session.list(this.globalParams(workspaceID), {
+            await this.publicClient.session.list(this.scopedParams({}, this.resolveDirectory(options.directory), workspaceID), {
               responseStyle: "data",
               throwOnError: true,
             }),
           ) as any[]
         }
-
-        return unwrap(
-          await this.publicClient.session.list(this.scopedParams({}, this.resolveDirectory(options.directory), workspaceID), {
-            responseStyle: "data",
-            throwOnError: true,
-          }),
-        ) as any[]
       }
 
+      // Classic in-process fallback — route-handler format (established SDK contract)
       return unwrap(
         await this.client.session.list(
           options.global
@@ -145,7 +160,7 @@ export class OpenCodeAdapter {
               ? withScopeQuery({}, this.resolveDirectory(options.directory), workspaceID)
               : typeof workspaceID === "string"
                 ? withScopeQuery({}, undefined, workspaceID)
-              : undefined,
+                : undefined,
         ),
       ) as any[]
     } catch (error) {
@@ -189,24 +204,58 @@ export class OpenCodeAdapter {
   async getSessionMessages(sessionID: string, directory?: string, workspaceID = this.options.workspaceID) {
     const resolvedDirectory = this.resolveDirectory(directory)
 
-    if (getRawClient(this.client)) {
-      return (await rawRequest(this.client, {
-        path: `/session/${encodeURIComponent(sessionID)}/message`,
-        query: scopeQuery(resolvedDirectory, workspaceID),
-        throwOnError: true,
-      })) as any[]
+    // Tier 1 & 2: V2 HTTP path (raw client or publicClient.v2) — paginate to completion
+    if (getRawClient(this.client) || this.publicClient?.v2?.session?.messages) {
+      const allMessages: any[] = []
+      let cursor: string | undefined = undefined
+      let v2Succeeded = false
+      try {
+        while (true) {
+          const page = await this.fetchV2MessagePage(sessionID, {
+            directory: resolvedDirectory,
+            workspaceID,
+            limit: 100,
+            order: cursor === undefined ? "asc" : undefined,
+            cursor,
+          })
+          const items: any[] = Array.isArray(page.items) ? page.items : []
+          allMessages.push(...items.map(projectV2Message))
+          cursor = typeof page.cursor?.next === "string" ? page.cursor.next : undefined
+          v2Succeeded = true
+          if (!cursor) break
+        }
+        if (v2Succeeded) return allMessages
+      } catch {
+        // V2 endpoint unreachable or not yet implemented — fall through to classic
+      }
     }
 
+    // Tier 3: classic in-process client (always available in plugin context)
+    // Returns classic {info, parts} shape — normalizeMessage handles it directly.
     if (this.publicClient?.session?.messages) {
       return unwrap(
-        await this.publicClient.session.messages(this.scopedParams({ sessionID }, resolvedDirectory, workspaceID), {
-          responseStyle: "data",
-          throwOnError: true,
-        }),
+        await this.publicClient.session.messages(
+          this.scopedParams({ sessionID }, resolvedDirectory, workspaceID),
+          { responseStyle: "data", throwOnError: true },
+        ),
       ) as any[]
     }
 
-    return unwrap(await this.client.session.messages(withScopeQuery({ path: { id: sessionID } }, resolvedDirectory, workspaceID))) as any[]
+    // Try new flat-param format first (SDK ≥ 1.17), then fall back to the old
+    // route-handler format for older internal clients.
+    try {
+      return unwrap(
+        await this.client.session.messages(
+          this.scopedParams({ sessionID }, resolvedDirectory, workspaceID),
+        ),
+      ) as any[]
+    } catch {
+      return unwrap(
+        await this.client.session.messages(
+          withScopeQuery({ path: { id: sessionID } }, resolvedDirectory, workspaceID),
+        ),
+      ) as any[]
+    }
   }
 
   async abortSession(sessionID: string, directory?: string, workspaceID = this.options.workspaceID) {
@@ -242,64 +291,86 @@ export class OpenCodeAdapter {
     options: {
       directory?: string
       limit: number
-      before?: string
+      cursor?: string
       workspaceID?: string
     },
   ): Promise<SessionMessagePage> {
-    if (getRawClient(this.client)) {
-      const response = await rawRequest<{ data?: any[]; response?: Response }>(this.client, {
-        path: `/session/${encodeURIComponent(sessionID)}/message`,
-        query: {
-          ...(scopeQuery(this.resolveDirectory(options.directory), options.workspaceID ?? this.options.workspaceID) ?? {}),
+    // Tier 1 & 2: V2 cursor paging
+    if (getRawClient(this.client) || this.publicClient?.v2?.session?.messages) {
+      try {
+        const page = await this.fetchV2MessagePage(sessionID, {
+          directory: this.resolveDirectory(options.directory),
+          workspaceID: options.workspaceID ?? this.options.workspaceID,
           limit: options.limit,
-          ...(typeof options.before === "string" ? { before: options.before } : {}),
+          // First page (no cursor): newest first so we can walk backward toward older messages.
+          // Follow-up pages: cursor only — do not combine with order per V2 API contract.
+          order: options.cursor === undefined ? "desc" : undefined,
+          cursor: options.cursor,
+        })
+
+        // Reverse desc-ordered items to ascending (oldest-first within page),
+        // matching the classic API orientation that loadNextPagedSessionChunk expects.
+        const messages = [...page.items].reverse().map(projectV2Message)
+        return { messages, nextCursor: page.cursor?.next }
+      } catch {
+        // V2 endpoint unreachable — signal caller to fall back to full-history
+      }
+    }
+
+    throw new SessionMessagePagingUnsupportedError()
+  }
+
+  private async fetchV2MessagePage(
+    sessionID: string,
+    options: {
+      directory?: string
+      workspaceID?: string
+      limit: number
+      order?: "asc" | "desc"
+      cursor?: string
+    },
+  ): Promise<{ items: any[]; cursor: { next?: string; previous?: string } }> {
+    let raw: unknown
+
+    if (getRawClient(this.client)) {
+      raw = await rawRequest(this.client, {
+        path: `/api/session/${encodeURIComponent(sessionID)}/message`,
+        query: {
+          ...(scopeQuery(options.directory, options.workspaceID) ?? {}),
+          limit: options.limit,
+          ...(options.order !== undefined ? { order: options.order } : {}),
+          ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
         },
-        responseStyle: "fields",
         throwOnError: true,
       })
-      const messages = unwrap(response.data ?? []) as any[]
-      const nextCursor = response.response ? extractSessionMessagePagingCursor(response.response.headers) : undefined
-
-      if (messages.length >= options.limit && !nextCursor) {
-        throw new SessionMessagePagingUnsupportedError()
-      }
-
-      return {
-        messages,
-        nextCursor,
-      }
+    } else if (this.publicClient?.v2?.session?.messages) {
+      const result = await this.publicClient.v2.session.messages(
+        this.scopedParams(
+          {
+            sessionID,
+            limit: options.limit,
+            ...(options.order !== undefined ? { order: options.order } : {}),
+            ...(options.cursor !== undefined ? { cursor: options.cursor } : {}),
+          },
+          options.directory,
+          options.workspaceID,
+        ),
+        { responseStyle: "data", throwOnError: true },
+      )
+      raw = unwrap(result)
+    } else {
+      throw new Error(
+        "V2 session message API is unavailable: neither raw client nor public v2.session.messages is accessible",
+      )
     }
 
-    if (!this.publicClient?.session?.messages) {
-      throw new Error("OpenCode client does not expose public session message paging")
+    // Normalise response: V2 servers return { items, cursor } but OpenCode 1.x
+    // may return the classic flat array from the /api/session/* path as well.
+    if (Array.isArray(raw)) {
+      return { items: raw, cursor: {} }
     }
 
-    const response = await this.publicClient.session.messages(
-      this.scopedParams(
-        {
-          sessionID,
-          limit: options.limit,
-          ...(typeof options.before === "string" ? { before: options.before } : {}),
-        },
-        this.resolveDirectory(options.directory),
-        options.workspaceID ?? this.options.workspaceID,
-      ),
-      {
-        responseStyle: "fields",
-        throwOnError: true,
-      },
-    )
-    const messages = unwrap(response.data) as any[]
-    const nextCursor = extractSessionMessagePagingCursor(response.response.headers)
-
-    if (messages.length >= options.limit && !nextCursor) {
-      throw new SessionMessagePagingUnsupportedError()
-    }
-
-    return {
-      messages,
-      nextCursor,
-    }
+    return raw as { items: any[]; cursor: { next?: string; previous?: string } }
   }
 
   async resolveSession(sessionID: string) {
@@ -451,44 +522,6 @@ export class OpenCodeAdapter {
   }
 }
 
-const extractSessionMessagePagingCursor = (headers: Headers) => {
-  const directCursor = headers.get("x-next-cursor")?.trim()
-  if (directCursor) {
-    return directCursor
-  }
-
-  const linkHeader = headers.get("link")
-  if (!linkHeader) {
-    return undefined
-  }
-
-  for (const entry of linkHeader.split(",")) {
-    const linkMatch = entry.match(/<([^>]+)>\s*;\s*rel="?([^";]+)"?/i)
-    if (!linkMatch) {
-      continue
-    }
-
-    const relTokens = linkMatch[2]!
-      .split(/\s+/)
-      .map((token) => token.trim().toLowerCase())
-      .filter(Boolean)
-    if (!relTokens.includes("next") && !relTokens.includes("prev")) {
-      continue
-    }
-
-    try {
-      const parsed = new URL(linkMatch[1]!, "https://example.test")
-      const before = parsed.searchParams.get("before")?.trim()
-      if (before) {
-        return before
-      }
-    } catch {
-      continue
-    }
-  }
-
-  return undefined
-}
 
 const recoverServerUrlFromInternalClient = (client: unknown): URL | undefined => {
   if (!client || typeof client !== "object") {

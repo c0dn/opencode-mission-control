@@ -49,11 +49,13 @@ Mission Control exposes its session, search, and observe tools unconditionally. 
 - `mc_session_get` returns normalized metadata for one session ID; it does not return transcript messages.
 - `mc_session_find` returns normalized metadata candidates for exact title lookup; exact titles can be ambiguous, so callers should select from candidates using metadata.
 - `mc_session_read` is the exact transcript inspection tool and supports newest-relative paging with `offset` and `limit`.
-- `mc_session_tail` is the compact recent-message view and omits tool outputs, reasoning, and step markers.
-- limited `mc_session_read` / `mc_session_tail` calls use raw OpenCode session-message paging when the runtime exposes the raw request client.
-- that raw paged path fetches only enough recent message pages to satisfy the requested page plus one older-entry probe for `hasMore`.
-- anchored reads (`beforeMessageId`) and runtimes without the raw request client still use the exact full-history path.
-- because the upstream session-message API does not expose a total-count field, `totalEntriesExact` is `false` and `totalEntries` is only a lower bound whenever `hasMore` is `true` on the raw paged path.
+- `mc_session_tail` is the compact recent-message view and omits tool outputs, reasoning, step markers, `agent-switched`, and `model-switched` entries. Compaction summaries are included.
+- all message reads use the V2 session API (`/api/session/{id}/message`). There is no classic `/session/{id}/message` fallback; servers older than the V2 routes are not supported.
+- limited `mc_session_read` / `mc_session_tail` calls use the V2 cursor-based paging API. The first page is fetched with `order: "desc"` (newest first); follow-up pages use the opaque `cursor.next` value without an explicit order parameter (per V2 API contract: do not combine `cursor` with `order`).
+- each page is reversed to ascending order before processing so that newest-relative offset/limit semantics are preserved across all consumers.
+- anchored reads (`beforeMessageId`) and unlimited reads use the V2 full-history path: paginate `order: "asc"` to completion following `cursor.next`.
+- because the V2 messages API does not expose a total-count field, `totalEntriesExact` is `false` and `totalEntries` is only a lower bound whenever `hasMore` is `true` on the paged path.
+- V2 message types `agent-switched`, `model-switched`, and `compaction` are first-class transcript entries with distinct `partType` values. They appear in `mc_session_read` and search results. Switches are excluded from `mc_session_tail`; compaction summaries are included.
 
 ## Session abort
 
@@ -123,7 +125,7 @@ Persistence rules:
 - workspace-scoped runtimes use isolated cache/index partitions; no-workspace runtimes keep the legacy partitions.
 - sidecar writes are best-effort and aim to be idempotent where practical.
 - unchanged sessions are incrementally reused through persisted cursors/checkpoints.
-- legacy JSON search-index sidecars may be imported when present, but the active search cache is SQLite-backed.
+- indexes with a `version` field that does not match the current internal version (7 as of v1.17.4) are discarded and rebuilt entirely. This includes all indexes built before the V2 message projection migration — chunk IDs changed as part of that migration.
 
 ## Session search
 

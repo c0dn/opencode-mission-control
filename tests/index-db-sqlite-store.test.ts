@@ -36,7 +36,7 @@ describe("SqliteSearchIndexStore", () => {
     const loaded = store.loadScopedSnapshot("current_directory")
 
     expect(loaded).toMatchObject({
-      version: 5,
+      version: 7,
       builtAt: 200,
       snapshotAt: 99,
       discovery: {
@@ -351,7 +351,7 @@ const makeIndex = (options: {
   title?: string
   text?: string
 }): SearchIndexDocument => ({
-  version: 5,
+  version: 7,
   builtAt: options.builtAt ?? 100,
   snapshotAt: 99,
   discovery: {

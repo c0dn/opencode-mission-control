@@ -59,7 +59,14 @@ export const extractTailText = (message: any) => {
       }
 
       const type = typeof part.type === "string" ? part.type : "unknown"
-      return type !== "step-start" && type !== "step-finish" && type !== "tool" && type !== "reasoning"
+      return (
+        type !== "step-start" &&
+        type !== "step-finish" &&
+        type !== "tool" &&
+        type !== "reasoning" &&
+        type !== "agent-switched" &&
+        type !== "model-switched"
+      )
     })
     .map((part: any) => extractPartText(part).trim())
     .filter(Boolean)

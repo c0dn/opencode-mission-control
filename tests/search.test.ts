@@ -14,6 +14,72 @@ import { MissionControlSearchService } from "../src/search.ts"
 import { MissionControlSourceDB } from "../src/source-db.ts"
 import { openMissionControlSqliteDatabase } from "../src/storage/sqlite.ts"
 
+// ---------------------------------------------------------------------------
+// V2 adapter helpers — search tests need v2.session.messages for indexing
+// ---------------------------------------------------------------------------
+
+/** Convert a classic {info, parts} test fixture to V2 format for getSessionMessages. */
+const toV2Item = (classic: any): any => {
+  const info = classic?.info ?? {}
+  const parts = classic?.parts ?? []
+  const time = info.time ?? { created: 0 }
+  if (info.role === "user") {
+    return { id: info.id, type: "user", time, text: parts.find((p: any) => p.type === "text")?.text ?? "" }
+  }
+  return {
+    id: info.id,
+    type: "assistant",
+    time,
+    ...(info.agent ? { agent: info.agent } : {}),
+    content: parts.map((p: any) => {
+      if (p.type === "text") return { type: "text", text: p.text ?? "" }
+      if (p.type === "reasoning") return { id: p.id, type: "reasoning", text: p.text ?? "" }
+      if (p.type === "tool")
+        return {
+          id: p.id,
+          type: "tool",
+          name: p.tool ?? p.toolName ?? "unknown",
+          state: { status: p.state?.status ?? "completed", content: [{ type: "text", text: p.state?.output ?? p.text ?? "" }], input: {}, structured: {} },
+        }
+      return { type: p.type, text: p.text ?? "" }
+    }),
+  }
+}
+
+/**
+ * Drop-in replacement for `new OpenCodeAdapter(clientDef)` that auto-extracts
+ * `session.messages` from clientDef and wraps it as `v2.session.messages` so
+ * that the V2-only getSessionMessages path works without a real server.
+ *
+ * Classic messages signature `({ path: { id }, query })` is mapped to V2
+ * params `{ sessionID, directory }` transparently.
+ */
+const makeV2Adapter = (clientDef: Record<string, any>) => {
+  const session = clientDef?.session ?? {}
+  const { messages: classicMessages, ...sessionWithoutMessages } = session
+
+  const sdkClient = classicMessages
+    ? {
+        v2: {
+          session: {
+            async messages(params: { sessionID: string; directory?: string; limit?: number; order?: string; cursor?: string }) {
+              const classics = await classicMessages({
+                path: { id: params.sessionID },
+                query: typeof params.directory === "string" ? { directory: params.directory } : undefined,
+              })
+              return { items: (classics ?? []).map(toV2Item), cursor: {} }
+            },
+          },
+        },
+      }
+    : undefined
+
+  return new OpenCodeAdapter(
+    { ...clientDef, session: sessionWithoutMessages },
+    sdkClient ? { sdkClient } : undefined,
+  )
+}
+
 const tempDirs: string[] = []
 
 afterEach(async () => {
@@ -30,7 +96,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -112,7 +178,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -191,7 +257,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -258,7 +324,7 @@ describe("MissionControlSearchService", () => {
       },
     })
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list({ query }: { query?: { directory?: string } } = {}) {
           if (query?.directory === "") {
@@ -350,7 +416,7 @@ describe("MissionControlSearchService", () => {
     let revision = 1
     const messageCalls = new Map<string, number>()
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -420,7 +486,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -501,7 +567,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -566,7 +632,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -606,7 +672,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -681,7 +747,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -734,7 +800,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -787,7 +853,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -847,7 +913,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -915,7 +981,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -982,7 +1048,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1063,7 +1129,7 @@ describe("MissionControlSearchService", () => {
     let queryCalls = 0
     let passageCalls = 0
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1126,7 +1192,7 @@ describe("MissionControlSearchService", () => {
     let queryCalls = 0
     let signature = "query-cache-signature-a"
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1187,7 +1253,7 @@ describe("MissionControlSearchService", () => {
     let revision = 1
     let passageCalls = 0
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return revision === 1
@@ -1261,8 +1327,9 @@ describe("MissionControlSearchService", () => {
 
     const persistedIndex = loadPersistedIndex(second.data.indexPath, "current_directory")
 
-    expect(Object.keys(persistedIndex.semantic?.vectors ?? {})).toEqual(["session-keep-part"])
-    expect(Object.keys(persistedIndex.semantic?.fingerprints ?? {})).toEqual(["session-keep-part"])
+    // V2 text parts have no explicit ID → positional fallback: sessionID:messageID:partIndex
+    expect(Object.keys(persistedIndex.semantic?.vectors ?? {})).toEqual(["session-keep:session-keep-message:0"])
+    expect(Object.keys(persistedIndex.semantic?.fingerprints ?? {})).toEqual(["session-keep:session-keep-message:0"])
     expect(passageCalls).toBe(2)
   })
 
@@ -1272,7 +1339,7 @@ describe("MissionControlSearchService", () => {
 
     let queryCalls = 0
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1361,7 +1428,7 @@ describe("MissionControlSearchService", () => {
     let revision = 1
     let embedCalls = 0
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1434,7 +1501,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1490,7 +1557,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1548,7 +1615,7 @@ describe("MissionControlSearchService", () => {
     tempDirs.push(directory)
 
     let revision = 1
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list() {
           return [
@@ -1604,7 +1671,7 @@ describe("MissionControlSearchService", () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list({ query }: { query?: { directory?: string } } = {}) {
           if (query?.directory === "") {
@@ -1635,7 +1702,7 @@ describe("MissionControlSearchService", () => {
     const otherDirectory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory, otherDirectory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list({ query }: { query?: { directory?: string } } = {}) {
           if (query?.directory === "") {
@@ -1706,7 +1773,7 @@ describe("MissionControlSearchService", () => {
     const otherDirectory = await mkdtemp(join(tmpdir(), "mission-control-search-"))
     tempDirs.push(directory, otherDirectory)
 
-    const adapter = new OpenCodeAdapter({
+    const adapter = makeV2Adapter({
       session: {
         async list({ query }: { query?: { directory?: string } } = {}) {
           if (query?.directory === "") {

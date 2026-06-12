@@ -1,6 +1,6 @@
 {
   "name": "opencode-mission-control",
-  "version": "0.1.0",
+  "version": "1.17.4",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",

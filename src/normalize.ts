@@ -47,6 +47,9 @@ const normalizePartType = (partType: string): SessionChunk["partType"] => {
     case "reasoning":
     case "step-start":
     case "step-finish":
+    case "agent-switched":
+    case "model-switched":
+    case "compaction":
       return partType
     default:
       return "unknown"

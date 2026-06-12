@@ -242,6 +242,7 @@ describe("inter-session messaging tools", () => {
 
     expect(description).toContain("next loop boundary")
     expect(description).toContain("inter_agent_message")
+    expect(description).toContain("refuses to prompt child/subagent sessions")
     expect(description).toContain("mc_session_tail")
   })
 })

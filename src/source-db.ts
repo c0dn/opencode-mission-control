@@ -54,7 +54,14 @@ export class MissionControlSourceDB {
     const entries: SessionTranscriptEntry[] = []
 
     for (const session of sessions) {
-      const messages = await adapter.getSessionMessages(session.sessionID, session.directory, session.workspaceID)
+      let messages: any[]
+      try {
+        messages = await adapter.getSessionMessages(session.sessionID, session.directory, session.workspaceID)
+      } catch {
+        // Session messages unavailable (e.g. cross-directory session, in-flight, or unreachable);
+        // skip this session rather than aborting the entire index build.
+        continue
+      }
       for (const message of messages) {
         const normalized = normalizeMessage(session.sessionID, message, options.includeToolOutputs)
         if (normalized) {

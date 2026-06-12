@@ -1,6 +1,10 @@
 import type { Database } from "bun:sqlite"
 
 import { dot } from "../search/fingerprint.js"
+
+// Must match MissionControlIndexDB.VERSION. Bumped to 7 for the V2 message
+// projection migration — chunk IDs changed so all existing indexes must rebuild.
+const CURRENT_INDEX_VERSION = 7
 import type { SourceSessionRecord } from "../source-db.js"
 import type { MissionControlSqliteDatabase } from "../storage/sqlite.js"
 import type { NativeVectorBackendName, SessionChunk, SessionDiscoveryScope, VectorBackendName, VectorBackendPreference } from "../types.js"
@@ -219,6 +223,12 @@ export class SqliteSearchIndexStore {
   private loadScopedSnapshotRows(scope: SessionDiscoveryScope): SearchIndexDocument | undefined {
     const state = this.database.prepare("SELECT * FROM index_state WHERE scope = ?").get(scope) as IndexStateRow | undefined
     if (!state) {
+      return undefined
+    }
+
+    // Discard snapshots from older index versions — chunk IDs changed with the V2
+    // message projection, so stale indexes must be rebuilt entirely.
+    if (state.version !== CURRENT_INDEX_VERSION) {
       return undefined
     }
 

@@ -7,6 +7,90 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { DEFAULT_CONFIG, createMissionControlConfig } from "../src/config.ts"
 import { MissionControlServer } from "../src/server.ts"
 
+// ---------------------------------------------------------------------------
+// V2 helpers — server tests pass client.session.messages in classic format.
+// wrapWithV2Messages extracts that function and re-exposes it as a raw client
+// GET handler for /api/session/{id}/message returning V2 {items, cursor} so
+// that the V2-only getSessionMessages path works without a real server.
+// ---------------------------------------------------------------------------
+
+const toV2Item = (classic: any): any => {
+  const info = classic?.info ?? {}
+  const parts = classic?.parts ?? []
+  const time = info.time ?? { created: 0 }
+  if (info.role === "user") {
+    return { id: info.id, type: "user", time, text: parts.find((p: any) => p.type === "text")?.text ?? "" }
+  }
+  return {
+    id: info.id,
+    type: "assistant",
+    time,
+    ...(info.agent ? { agent: info.agent } : {}),
+    content: parts.map((p: any) => {
+      if (p.type === "text") return { type: "text", text: p.text ?? "" }
+      if (p.type === "tool")
+        return { id: p.id, type: "tool", name: p.tool ?? p.toolName ?? "unknown", state: { status: "completed", content: [{ type: "text", text: p.state?.output ?? p.text ?? "" }], input: {}, structured: {} } }
+      return { type: p.type, text: p.text ?? "" }
+    }),
+  }
+}
+
+/**
+ * Wrap a classic server client so session.messages is exposed through a raw
+ * GET handler for the V2 /api/session/{id}/message endpoint, while all other
+ * paths (session listing, get, children) delegate back to the original session
+ * methods so the rest of the adapter still works normally.
+ */
+const wrapWithV2Messages = (client: Record<string, any>): Record<string, any> => {
+  const session = client?.session ?? {}
+  const { messages: classicMessages, list: listFn, get: getFn, children: childrenFn, ...sessionRest } = session
+
+  if (!classicMessages) return client
+
+  return {
+    ...client,
+    session: sessionRest,
+    _client: {
+      async get(options: { url?: string; query?: Record<string, unknown> }) {
+        const url = options?.url ?? ""
+
+        // V2 message path — return projected V2 items
+        const msgMatch = url.match(/^\/api\/session\/([^/]+)\/message$/)
+        if (msgMatch) {
+          const sessionID = decodeURIComponent(msgMatch[1]!)
+          const dir = typeof options?.query?.directory === "string" ? options.query.directory : undefined
+          const classics = await classicMessages({ path: { id: sessionID }, query: dir ? { directory: dir } : undefined })
+          return { data: { items: (classics ?? []).map(toV2Item), cursor: {} } }
+        }
+
+        // Session listing (/session or /experimental/session)
+        if (url === "/session" || url === "/experimental/session") {
+          const result = listFn ? await listFn({ query: options?.query }) : []
+          return { data: result }
+        }
+
+        // Session get (/session/{id})
+        const getMatch = url.match(/^\/session\/([^/?]+)$/)
+        if (getMatch) {
+          const id = decodeURIComponent(getMatch[1]!)
+          const result = getFn ? await getFn({ path: { id }, query: options?.query }) : { id }
+          return { data: result }
+        }
+
+        // Children (/session/{id}/children)
+        const childMatch = url.match(/^\/session\/([^/]+)\/children$/)
+        if (childMatch) {
+          const id = decodeURIComponent(childMatch[1]!)
+          const result = childrenFn ? await childrenFn({ path: { id }, query: options?.query }) : []
+          return { data: result }
+        }
+
+        throw new Error(`Unexpected raw url in V2 test shim: ${url}`)
+      },
+    },
+  }
+}
+
 const tempDirs: string[] = []
 
 afterEach(async () => {
@@ -49,17 +133,10 @@ describe("MissionControlServer", () => {
 
     const server = new MissionControlServer(
       {
-        client: {
+        client: wrapWithV2Messages({
           session: {
             async list() {
-              return [
-                {
-                  id: "server-session",
-                  directory,
-                  title: "Server Session",
-                  time: { created: 1, updated: 10 },
-                },
-              ]
+              return [{ id: "server-session", directory, title: "Server Session", time: { created: 1, updated: 10 } }]
             },
             async messages() {
               return [
@@ -70,12 +147,8 @@ describe("MissionControlServer", () => {
               ]
             },
           },
-          app: {
-            async log() {
-              return undefined
-            },
-          },
-        },
+          app: { async log() { return undefined } },
+        }),
         directory,
         worktree: directory,
       },
@@ -108,62 +181,29 @@ describe("MissionControlServer", () => {
 
     const server = new MissionControlServer(
       {
-        client: {
+        client: wrapWithV2Messages({
           session: {
             async list({ query }: { query?: { directory?: string } } = {}) {
               if (query?.directory === "") {
                 return [
-                  {
-                    id: "local-session",
-                    directory,
-                    title: "Local Session",
-                    time: { created: 1, updated: 10 },
-                  },
-                  {
-                    id: "global-session",
-                    directory: otherDirectory,
-                    title: "Global Session",
-                    time: { created: 2, updated: 11 },
-                  },
+                  { id: "local-session", directory, title: "Local Session", time: { created: 1, updated: 10 } },
+                  { id: "global-session", directory: otherDirectory, title: "Global Session", time: { created: 2, updated: 11 } },
                 ]
               }
-
-              return [
-                {
-                  id: "local-session",
-                  directory,
-                  title: "Local Session",
-                  time: { created: 1, updated: 10 },
-                },
-              ]
+              return [{ id: "local-session", directory, title: "Local Session", time: { created: 1, updated: 10 } }]
             },
             async messages({ path, query }: { path: { id: string }; query?: { directory?: string } }) {
               if (path.id === "local-session") {
                 expect(query?.directory).toBe(directory)
-                return [
-                  {
-                    info: { id: "local-message", role: "assistant", time: { created: 5 } },
-                    parts: [{ id: "local-part", type: "text", text: "local indexed content" }],
-                  },
-                ]
+                return [{ info: { id: "local-message", role: "assistant", time: { created: 5 } }, parts: [{ id: "local-part", type: "text", text: "local indexed content" }] }]
               }
-
               expect(path.id).toBe("global-session")
               expect(query?.directory).toBe(otherDirectory)
-              return [
-                {
-                  info: { id: "global-message", role: "assistant", time: { created: 6 } },
-                  parts: [{ id: "global-part", type: "text", text: "global indexed content" }],
-                },
-              ]
+              return [{ info: { id: "global-message", role: "assistant", time: { created: 6 } }, parts: [{ id: "global-part", type: "text", text: "global indexed content" }] }]
             },
           },
-          app: {
-            async log() {
-              return undefined
-            },
-          },
-        },
+          app: { async log() { return undefined } },
+        }),
         directory,
         worktree: directory,
       },
@@ -190,7 +230,7 @@ describe("MissionControlServer", () => {
     let revision = 1
     const server = new MissionControlServer(
       {
-        client: {
+        client: wrapWithV2Messages({
           session: {
             async list() {
               return [
@@ -222,7 +262,7 @@ describe("MissionControlServer", () => {
               return undefined
             },
           },
-        },
+        }),
         directory,
         worktree: directory,
       },
@@ -257,40 +297,23 @@ describe("MissionControlServer", () => {
 
     let revision = 1
     const messageCalls = new Map<string, number>()
-    const client = {
+    const client = wrapWithV2Messages({
       session: {
         async list() {
-          return [
-            {
-              id: "restart-dirty-session",
-              directory,
-              title: "Restart Dirty Session",
-              time: { created: 1, updated: 10 },
-            },
-          ]
+          return [{ id: "restart-dirty-session", directory, title: "Restart Dirty Session", time: { created: 1, updated: 10 } }]
         },
         async messages({ path }: { path: { id: string } }) {
           messageCalls.set(path.id, (messageCalls.get(path.id) ?? 0) + 1)
           return [
             {
               info: { id: "restart-dirty-message", role: "assistant", time: { created: 5 } },
-              parts: [
-                {
-                  id: "restart-dirty-part",
-                  type: "text",
-                  text: revision === 1 ? "restart old token" : "restart new token",
-                },
-              ],
+              parts: [{ id: "restart-dirty-part", type: "text", text: revision === 1 ? "restart old token" : "restart new token" }],
             },
           ]
         },
       },
-      app: {
-        async log() {
-          return undefined
-        },
-      },
-    }
+      app: { async log() { return undefined } },
+    })
 
     const server1 = new MissionControlServer(
       {
@@ -345,20 +368,12 @@ describe("MissionControlServer", () => {
 
     let revision = 1
     const messageCalls = new Map<string, number>()
-    const client = {
+    const client = wrapWithV2Messages({
       session: {
         async list({ query }: { query?: { directory?: string } } = {}) {
           if (query?.directory === "") {
-            return [
-              {
-                id: "shared-global-session",
-                directory: "/tmp/shared-project",
-                title: "Shared Global Session",
-                time: { created: 1, updated: 10 },
-              },
-            ]
+            return [{ id: "shared-global-session", directory: "/tmp/shared-project", title: "Shared Global Session", time: { created: 1, updated: 10 } }]
           }
-
           return []
         },
         async messages({ path }: { path: { id: string } }) {
@@ -366,23 +381,13 @@ describe("MissionControlServer", () => {
           return [
             {
               info: { id: "shared-global-message", role: "assistant", time: { created: 5 } },
-              parts: [
-                {
-                  id: "shared-global-part",
-                  type: "text",
-                  text: revision === 1 ? "global stale token" : "global refreshed token",
-                },
-              ],
+              parts: [{ id: "shared-global-part", type: "text", text: revision === 1 ? "global stale token" : "global refreshed token" }],
             },
           ]
         },
       },
-      app: {
-        async log() {
-          return undefined
-        },
-      },
-    }
+      app: { async log() { return undefined } },
+    })
 
     const serverA = new MissionControlServer(
       {
