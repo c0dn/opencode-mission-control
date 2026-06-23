@@ -83,24 +83,6 @@ export interface ToolFailure {
 
 export type ToolResult<T> = ToolSuccess<T> | ToolFailure
 
-export interface MissionControlCapabilityMatrix {
-  search: {
-    sessionGet: boolean
-    sessionFind: boolean
-    sessionRead: boolean
-    sessionTail: boolean
-    sessionTree: boolean
-    sessionAbort: boolean
-    sessionSend: boolean
-    indexedRetrieval: boolean
-    semanticRetrieval: boolean
-  }
-  observe: {
-    liveEvents: boolean
-    recentBuffer: boolean
-  }
-}
-
 export interface MissionControlEventRecord {
   type: string
   at: number
@@ -131,31 +113,7 @@ export interface MissionControlIndexStatus {
   dirtySessionCount: number
 }
 
-export interface MissionControlStatus {
-  name: string
-  startedAt: number
-  directory: string
-  workspaceID?: string
-  implemented: {
-    sessionRead: boolean
-    sessionGet: boolean
-    sessionFind: boolean
-    sessionTail: boolean
-    sessionTree: boolean
-    sessionAbort: boolean
-    sessionSend: boolean
-    sessionObserve: boolean
-    sessionSearch: boolean
-  }
-  config: MissionControlConfig
-  counters: {
-    totalEvents: number
-    byType: Record<string, number>
-  }
-  capabilities: MissionControlCapabilityMatrix
-  index: MissionControlIndexStatus
-  recentEvents: MissionControlEventRecord[]
-}
+
 
 export interface SessionTranscriptPart {
   partId?: string
@@ -178,6 +136,19 @@ export interface SessionSearchArgs {
   scope?: "local" | "global"
   exact?: boolean
   limit?: number
+}
+
+export interface SessionListArgs {
+  scope?: "local" | "global"
+  start?: number
+  search?: string
+  limit?: number
+}
+
+export interface SessionListResult {
+  scope: "local" | "global"
+  sessions: SessionMetadata[]
+  total: number
 }
 
 export interface SessionMetadata {

@@ -127,7 +127,7 @@ describe("MissionControlServer", () => {
     await second.dispose()
   })
 
-  test("status reports built index metadata after a search", async () => {
+  test("search result carries built index metadata", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
     tempDirs.push(directory)
 
@@ -158,18 +158,16 @@ describe("MissionControlServer", () => {
 
     const searchResult = await server.searchSessions({ query: "server indexed content" })
     expect(searchResult.ok).toBe(true)
+    if (!searchResult.ok) throw new Error("search failed")
 
-    const status = await server.status()
-    expect(status.index.path).toContain("opencode-mission-control")
-    expect(status.index.builtAt).toBeDefined()
-    expect(status.index.discoveryScope).toBe("current_directory")
-    expect(status.index.discoveryDirectory).toBe(directory)
-    expect(status.index.indexedSessionCount).toBe(1)
-    expect(status.index.dirtySessionCount).toBe(0)
-    expect((status.capabilities as any).jobs).toBeUndefined()
+    expect(searchResult.data.indexPath).toContain("opencode-mission-control")
+    expect(searchResult.data.builtAt).toBeDefined()
+    expect(searchResult.data.discoveryScope).toBe("current_directory")
+    expect(searchResult.data.discoveryDirectory).toBe(directory)
+    expect(searchResult.data.indexedSessionCount).toBe(1)
   })
 
-  test("status reports the most recently built scope-specific index", async () => {
+  test("search result reflects the correct scope-specific index", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
     const otherDirectory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
     tempDirs.push(directory, otherDirectory)
@@ -213,17 +211,19 @@ describe("MissionControlServer", () => {
 
     const localSearch = await server.searchSessions({ query: "local indexed content" })
     expect(localSearch.ok).toBe(true)
+    if (!localSearch.ok) throw new Error("local search failed")
+    expect(localSearch.data.discoveryScope).toBe("current_directory")
+    expect(localSearch.data.indexedSessionCount).toBe(1)
 
     const globalSearch = await server.searchSessions({ query: "global indexed content", scope: "global" })
     expect(globalSearch.ok).toBe(true)
-
-    const status = await server.status()
-    expect(status.index.discoveryScope).toBe("global_unscoped")
-    expect(status.index.path).toContain("global_unscoped")
-    expect(status.index.indexedSessionCount).toBe(2)
+    if (!globalSearch.ok) throw new Error("global search failed")
+    expect(globalSearch.data.discoveryScope).toBe("global_unscoped")
+    expect(globalSearch.data.indexPath).toContain("global_unscoped")
+    expect(globalSearch.data.indexedSessionCount).toBe(2)
   })
 
-  test("status tracks dirty sessions and clears them after rebuild", async () => {
+  test("dirty session event triggers reindex and new content is found", async () => {
     const directory = await mkdtemp(join(tmpdir(), "mission-control-server-"))
     tempDirs.push(directory)
 
@@ -277,18 +277,12 @@ describe("MissionControlServer", () => {
     await server.onRuntimeEvent("message.part.updated", { sessionID: "dirty-server-session" })
     await server.onRuntimeEvent("message.part.updated", { sessionID: "unrelated-session" })
 
-    const dirtyStatus = await server.status()
-    expect(dirtyStatus.index.dirtySessionCount).toBe(1)
-
     const secondSearch = await server.searchSessions({ query: "server new token" })
     expect(secondSearch.ok).toBe(true)
     if (!secondSearch.ok) {
       throw new Error("Expected dirty server search to succeed")
     }
     expect(secondSearch.data.matches[0]?.snippet).toContain("server new token")
-
-    const cleanStatus = await server.status()
-    expect(cleanStatus.index.dirtySessionCount).toBe(0)
   })
 
   test("persists dirty invalidations across restart when content changes without updatedAt moving", async () => {

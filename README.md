@@ -1,6 +1,8 @@
 # opencode-mission-control
 
-OpenCode Mission Control adds session-aware retrieval and inspection to OpenCode. It can read transcripts, inspect session trees, watch recent session activity, and search indexed session content.
+OpenCode Mission Control adds session-aware retrieval and inspection to OpenCode. It can search transcript content, read sessions, look up session metadata, and message peer subagents.
+
+**Requires a Jina API key** (`search.jinaApiKey` in plugin options). Without a key the plugin registers no tools.
 
 ## Install
 
@@ -13,84 +15,64 @@ opencode plugin -g opencode-mission-control
 Detailed behavior and caveats live under `docs/`.
 
 - [`runtime_model.md`](docs/runtime_model.md) — cross-cutting runtime behavior, lifecycle rules, persistence, and non-goals
-- [`mc_status()`](docs/mc_status.md) — runtime health, config, counters, and capability probe
-- [`mc_session_read({ sessionId, beforeMessageId?, limit?, withChildren?, withToolOutputs? })`](docs/mc_session_read.md) — read a transcript, optionally including child sessions and raw tool outputs
-- [`mc_session_get({ sessionId })`](docs/mc_session_get.md) — get normalized metadata for one session ID
-- [`mc_session_find({ title, scope?, limit? })`](docs/mc_session_find.md) — find exact-title metadata candidates; titles can be ambiguous
-- [`mc_session_tail({ sessionId, offset?, limit?, withChildren? })`](docs/mc_session_tail.md) — view recent text-only messages
-- [`mc_session_tree({ sessionId, depth? })`](docs/mc_session_tree.md) — inspect a session’s parent/child tree
-- [`mc_session_abort({ sessionId })`](docs/mc_session_abort.md) — request cancellation of a session, primarily background subagents by subagent session ID
-- [`mc_session_send_async({ targetSessionId, message })`](docs/mc_session_send.md) — queue a message into another running session without blocking; the target acts on it at its next loop boundary
-- [`mc_session_send_interrupt({ targetSessionId, message })`](docs/mc_session_send.md) — abort the target's in-flight response, then deliver a message so it takes effect immediately
-- [`mc_session_events({ sessionId, withChildren?, limit? })`](docs/mc_session_events.md) — view recent live events and current status
-- [`mc_session_search({ query, scope?, exact?, limit? })`](docs/mc_session_search.md) — search indexed session content; `scope: "global"` widens discovery and `exact: true` forces lexical matching
+- [`session_search({ query, limit? })`](docs/session_search.md) — hybrid semantic+lexical search in the current project
+- [`session_search_global({ query, limit? })`](docs/session_search_global.md) — same, across all projects globally
+- [`session_read({ sessionId, beforeMessageId?, offset?, limit?, withChildren?, withToolOutputs? })`](docs/session_read.md) — read a transcript with pagination
+- [`session_tail({ sessionId, offset?, limit?, withChildren? })`](docs/session_tail.md) — view recent text-only messages
+- [`session_find({ title, scope?, limit? })`](docs/session_find.md) — find exact-title metadata candidates
+- [`session_get({ sessionId })`](docs/session_get.md) — get normalized metadata for one session ID
+- [`session_list({ scope?, start?, search?, limit? })`](docs/session_list.md) — browse and filter sessions
+- [`subagent_abort({ sessionId })`](docs/subagent_abort.md) — cancel a session, primarily background subagents
+- [`subagent_send_async({ targetSessionId, message })`](docs/subagent_send.md) — queue a message to a peer subagent
+- [`subagent_send_interrupt({ targetSessionId, message })`](docs/subagent_send.md) — abort a peer's in-flight response, then deliver a message immediately
 
 ## Common patterns
 
 ### Search sessions
 
 ```text
-mc_session_search({ query: "retry logic", limit: 5 })
+session_search({ query: "retry logic", limit: 5 })
 
-mc_session_search({
-  query: "SessionLookupUnavailable",
-  scope: "global",
-  exact: true,
-  limit: 10,
-})
+session_search_global({ query: "deploy pipeline" })
 ```
 
-Use `mc_session_search` when you want indexed transcript content. Search is content-only; use `mc_session_find` for exact title lookup and `mc_session_get` when you already have a session ID.
-
-Semantic/hybrid search is automatic when a Jina semantic provider/API key is configured and available. Otherwise search falls back to SQLite FTS/BM25 lexical retrieval; `exact: true` always uses lexical retrieval.
+Search is always hybrid: FTS5/BM25 lexical + Jina semantic embeddings fused with RRF. Use `session_find` for exact title lookup and `session_get` when you already have a session ID.
 
 ### Look up and read sessions
 
-Exact title lookup can return multiple candidates because titles are not unique:
-
 ```text
-mc_session_find({ title: "Search audit", limit: 5 })
+session_find({ title: "Search audit", limit: 5 })
 
-mc_session_get({ sessionId: "ses_123" })
+session_get({ sessionId: "ses_123" })
+
+session_list({ search: "CTF", scope: "global" })
 ```
 
-Use `mc_session_read` when you need exact transcript boundaries or raw tool outputs:
+Read transcript content:
 
 ```text
-mc_session_read({ sessionId: "ses_123", withToolOutputs: true })
+session_read({ sessionId: "ses_123", withToolOutputs: true })
+
+session_tail({ sessionId: "ses_123", limit: 10 })
 ```
 
-Use `mc_session_tail` for a compact latest-message view:
+### Peer subagent messaging
 
 ```text
-mc_session_tail({ sessionId: "ses_123", limit: 10 })
+subagent_send_async({
+  targetSessionId: "ses_peer_456",
+  message: "Found shared credential — skip auth step.",
+})
 ```
 
-### Observe session activity
-
-```text
-mc_session_events({ sessionId: "ses_123", withChildren: true, limit: 25 })
-
-mc_session_tree({ sessionId: "ses_123", depth: 2 })
-```
+Only works between sibling subagents (same parent session). To return a result to your calling agent, end your loop — results auto-return to the parent.
 
 ## Optional local skills
 
-This plugin does **not** install native OpenCode skills automatically. `opencode plugin` installs the plugin package and updates config, but it does not copy `SKILL.md` files into `.opencode/skills/`.
+This plugin does **not** install native OpenCode skills automatically. If you want reusable local skills for your workspace, ask OpenCode to generate them from these docs:
 
-If you want reusable local skills for your own workspace, the simplest path is to ask OpenCode to generate them from these docs:
-
-- `@docs/mc_session_search.md`
-- `@docs/mc_session_get.md`
-- `@docs/mc_session_find.md`
-- `@docs/mc_session_read.md`
+- `@docs/session_search.md`
+- `@docs/session_get.md`
+- `@docs/session_find.md`
+- `@docs/session_read.md`
 - `@docs/runtime_model.md`
-
-Example prompt:
-
-```text
-Create .opencode/skills/mission-control-search/SKILL.md from @docs/.
-
-Use the Mission Control docs as the source of truth.
-Include examples for searching sessions, looking up sessions by ID or exact title, reading transcripts, and checking recent session events.
-```

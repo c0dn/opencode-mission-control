@@ -1,11 +1,11 @@
-# `mc_session_abort`
+# `subagent_abort`
 
-Requests cancellation of an OpenCode session by session ID.
+Requests cancellation of an OpenCode session by session ID. Primarily used to cancel background subagents.
 
 ## Call
 
 ```text
-mc_session_abort({ sessionId })
+subagent_abort({ sessionId })
 ```
 
 ## Arguments
@@ -15,9 +15,7 @@ mc_session_abort({ sessionId })
 ## Example
 
 ```text
-mc_session_abort({
-  sessionId: "ses_subagent_123",
-})
+subagent_abort({ sessionId: "ses_subagent_123" })
 ```
 
 ## What it returns
@@ -30,7 +28,7 @@ mc_session_abort({
 
 ## Caveats
 
-- This calls OpenCode's public `POST /session/{sessionID}/abort` API.
-- It works best for background subagents when you know the subagent session ID.
-- Foreground subagents can block the parent tool loop, so the parent may be unable to call this tool until the foreground subagent returns.
+- Calls OpenCode's public `POST /session/{sessionID}/abort` API.
+- Works best for background subagents when you know the subagent session ID.
+- Foreground subagents can block the parent tool loop, so the parent may not be able to call this until the foreground subagent returns.
 - Mission Control does not mutate OpenCode storage directly; it only sends the public abort request.

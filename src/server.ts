@@ -9,11 +9,10 @@ import { extractSessionID, extractWorkspaceID } from "./session-extractors.js"
 import { MissionControlSessionService } from "./session-service.js"
 import { MissionControlSourceDB } from "./source-db.js"
 import type {
-  MissionControlCapabilityMatrix,
   MissionControlConfig,
   MissionControlRuntimeSecrets,
-  MissionControlStatus,
   SessionFindArgs,
+  SessionListArgs,
 } from "./types.js"
 
 type PluginContext = {
@@ -152,75 +151,6 @@ export class MissionControlServer {
     }
   }
 
-  capabilities(): MissionControlCapabilityMatrix {
-    const exposesSessionTools = true
-
-    return {
-      search: {
-        sessionGet: exposesSessionTools,
-        sessionFind: exposesSessionTools,
-        sessionRead: exposesSessionTools,
-        sessionTail: exposesSessionTools,
-        sessionTree: exposesSessionTools,
-        sessionAbort: exposesSessionTools,
-        sessionSend: exposesSessionTools,
-        indexedRetrieval: exposesSessionTools && this.config.search.lexicalEnabled,
-        semanticRetrieval: exposesSessionTools && (this.semanticProvider?.isAvailable() ?? false),
-      },
-      observe: {
-        liveEvents: exposesSessionTools,
-        recentBuffer: exposesSessionTools,
-      },
-    }
-  }
-
-  async status(): Promise<MissionControlStatus> {
-    const rootDir = this.context.directory ?? this.context.worktree ?? "."
-    const indexDB = new MissionControlIndexDB(rootDir, this.config.search.indexPath, undefined, { workspaceKey: this.workspaceKey })
-    const index = await indexDB.load()
-    const indexStatus = await indexDB.readStatus()
-    const persistedDirtySessionIDs = index
-        ? await new MissionControlIndexDB(rootDir, this.config.search.indexPath, index.discovery.scope, { workspaceKey: this.workspaceKey }).readDirtySessionIDs(
-          index.sessions.map((session) => session.sessionID),
-        )
-      : []
-
-    return {
-      name: "opencode-mission-control",
-      startedAt: this.startedAt,
-      directory: rootDir,
-      workspaceID: this.workspaceID,
-      implemented: {
-        sessionGet: true,
-        sessionFind: true,
-        sessionRead: true,
-        sessionTail: true,
-        sessionTree: true,
-        sessionAbort: true,
-        sessionSend: true,
-        sessionObserve: true,
-        sessionSearch: this.config.search.lexicalEnabled || (this.semanticProvider?.isAvailable() ?? false),
-      },
-      config: this.config,
-      counters: this.runtimeState.counters(),
-      capabilities: this.capabilities(),
-      index: {
-        ...indexStatus,
-        includeToolOutputsForIndexing:
-          indexStatus.builtAt === undefined
-            ? this.config.search.includeToolOutputsForIndexing
-            : indexStatus.includeToolOutputsForIndexing,
-        dirtySessionCount: index
-          ? new Set([
-              ...this.runtimeState.dirtySessionIDs(index.sessions.map((session) => session.sessionID)),
-              ...persistedDirtySessionIDs,
-            ]).size
-          : 0,
-      },
-      recentEvents: this.runtimeState.recentEventsGlobal(this.config.observe.eventBufferSize),
-    }
-  }
-
   async onRuntimeEvent(type: string, payload: unknown) {
     this.runtimeState.recordEvent(type, payload)
     const rootDir = this.context.directory ?? this.context.worktree ?? "."
@@ -250,8 +180,11 @@ export class MissionControlServer {
   }
 
   async findSessions(args: SessionFindArgs) {
-    const adapter = this.adapter
-    return this.sessionService.findSessions(adapter, args)
+    return this.sessionService.findSessions(this.adapter, args)
+  }
+
+  async listSessions(args: SessionListArgs) {
+    return this.sessionService.listSessions(this.adapter, args)
   }
 
   async tailSession(
@@ -262,18 +195,11 @@ export class MissionControlServer {
       withChildren?: boolean
     },
   ) {
-    const adapter = this.adapter
-    return this.sessionService.tailSession(adapter, sessionId, options)
-  }
-
-  async sessionTree(sessionId: string, depth = 1) {
-    const adapter = this.adapter
-    return this.sessionService.sessionTree(adapter, sessionId, depth)
+    return this.sessionService.tailSession(this.adapter, sessionId, options)
   }
 
   async abortSession(sessionId: string) {
-    const adapter = this.adapter
-    return this.sessionService.abortSession(adapter, sessionId)
+    return this.sessionService.abortSession(this.adapter, sessionId)
   }
 
   async sendSessionMessageAsync(targetSessionId: string, text: string, fromSessionId?: string) {
@@ -284,21 +210,9 @@ export class MissionControlServer {
     return this.sessionService.sendMessageInterrupt(this.adapter, targetSessionId, text, fromSessionId)
   }
 
-  async observeSession(
-    sessionId: string,
-    options: {
-      withChildren?: boolean
-      limit?: number
-    },
-  ) {
-    const adapter = this.adapter
-    return this.sessionService.observeSession(adapter, sessionId, options)
-  }
-
   async searchSessions(args: import("./types.js").SessionSearchArgs) {
-    const adapter = this.adapter
     const rootDir = this.context.directory ?? this.context.worktree ?? "."
-    return this.searchService.search(adapter, this.config, rootDir, args, this.semanticProvider, this.workspaceID, this.workspaceKey)
+    return this.searchService.search(this.adapter, this.config, rootDir, args, this.semanticProvider, this.workspaceID, this.workspaceKey)
   }
 
   compactionContext(sessionId: string) {
@@ -322,7 +236,7 @@ export class MissionControlServer {
       [
         "Mission Control known subagent sessions for this session:",
         ...lines,
-        "Preserve these session IDs in the compacted summary when they may still be useful; running background subagents can be cancelled with mc_session_abort({ sessionId }).",
+        "Preserve these session IDs in the compacted summary when they may still be useful; running background subagents can be cancelled with subagent_abort({ sessionId }).",
       ].join("\n"),
     ]
   }

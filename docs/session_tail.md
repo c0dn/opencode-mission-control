@@ -1,11 +1,11 @@
-# `mc_session_tail`
+# `session_tail`
 
 Returns the latest text-only messages for a session.
 
 ## Call
 
 ```text
-mc_session_tail({ sessionId, offset?, limit?, withChildren? })
+session_tail({ sessionId, offset?, limit?, withChildren? })
 ```
 
 ## Arguments
@@ -18,9 +18,9 @@ mc_session_tail({ sessionId, offset?, limit?, withChildren? })
 ## Examples
 
 ```text
-mc_session_tail({ sessionId: "ses_123", limit: 10 })
+session_tail({ sessionId: "ses_123", limit: 10 })
 
-mc_session_tail({
+session_tail({
   sessionId: "ses_123",
   offset: 20,
   limit: 10,
@@ -46,4 +46,4 @@ mc_session_tail({
 - Limited tails use V2 cursor-based paging. The first page is fetched with `order: "desc"` (newest first); follow-up pages use the opaque `cursor.next` value.
 - Each page is reversed to ascending order before processing so newest-relative offset/limit semantics are preserved.
 - The V2 messages API does not expose a total-count field, so `totalEntriesExact` becomes `false` whenever `hasMore` is `true`.
-- Prefer this over `mc_session_read` when you only need the recent human-readable conversation.
+- Prefer this over `session_read` when you only need the recent human-readable conversation.

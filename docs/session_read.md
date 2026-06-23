@@ -1,11 +1,11 @@
-# `mc_session_read`
+# `session_read`
 
 Reads a session transcript.
 
 ## Call
 
 ```text
-mc_session_read({
+session_read({
   sessionId,
   beforeMessageId?,
   offset?,
@@ -27,26 +27,26 @@ mc_session_read({
 ## Examples
 
 ```text
-mc_session_read({ sessionId: "ses_123" })
+session_read({ sessionId: "ses_123" })
 
-mc_session_read({
+session_read({
   sessionId: "ses_123",
   offset: 50,
   limit: 25,
 })
 
-mc_session_read({
+session_read({
   sessionId: "ses_123",
   beforeMessageId: "msg_42",
 })
 
-mc_session_read({
+session_read({
   sessionId: "ses_123",
   withChildren: true,
   limit: 50,
 })
 
-mc_session_read({
+session_read({
   sessionId: "ses_123",
   withToolOutputs: true,
 })

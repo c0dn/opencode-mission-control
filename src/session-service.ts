@@ -18,6 +18,8 @@ import type {
   SessionAbortResult,
   SessionFindResult,
   SessionGetResult,
+  SessionListArgs,
+  SessionListResult,
   SessionMetadata,
   SessionObserveResult,
   SessionReadResult,
@@ -110,9 +112,9 @@ export class MissionControlSessionService {
       return fail("SessionNotFound", `Session '${targetSessionId}' was not found.`)
     }
 
-    const parentSessionId = this.getParentSessionId(targetSessionId, resolved.session)
-    if (parentSessionId) {
-      return rejectChildSessionPrompt(targetSessionId, parentSessionId)
+    const guardResult = this.checkPeerMessagingGuard(targetSessionId, resolved.session, fromSessionId)
+    if (guardResult) {
+      return guardResult
     }
 
     const envelope = buildInterAgentMessage({ fromSessionId, text })
@@ -162,9 +164,9 @@ export class MissionControlSessionService {
       return fail("SessionNotFound", `Session '${targetSessionId}' was not found.`)
     }
 
-    const parentSessionId = this.getParentSessionId(targetSessionId, resolved.session)
-    if (parentSessionId) {
-      return rejectChildSessionPrompt(targetSessionId, parentSessionId)
+    const guardResult = this.checkPeerMessagingGuard(targetSessionId, resolved.session, fromSessionId)
+    if (guardResult) {
+      return guardResult
     }
 
     let aborted: boolean | undefined
@@ -245,6 +247,56 @@ export class MissionControlSessionService {
         "SessionLookupUnavailable",
         "Session metadata lookup failed.",
         "Retry after the runtime settles, or narrow the lookup scope.",
+      )
+    }
+  }
+
+  async listSessions(adapter: OpenCodeAdapter, args: SessionListArgs): Promise<ToolResult<SessionListResult>> {
+    const scope = args.scope ?? "local"
+
+    try {
+      const sessions = await this.sourceDB.listSessions(adapter, { global: scope === "global" })
+
+      let filtered = sessions
+
+      if (args.start !== undefined) {
+        filtered = filtered.filter((s) => s.updatedAt >= args.start!)
+      }
+
+      if (args.search) {
+        const lower = args.search.toLowerCase()
+        filtered = filtered.filter((s) => s.title.toLowerCase().includes(lower))
+      }
+
+      const total = filtered.length
+      const limit = Math.min(args.limit ?? 20, 100)
+      const limited = filtered
+        .sort((a, b) => b.updatedAt - a.updatedAt || b.createdAt - a.createdAt)
+        .slice(0, limit)
+
+      return ok({
+        scope,
+        sessions: limited.map((s) => this.normalizeSourceSessionMetadata(s)),
+        total,
+      })
+    } catch (error) {
+      if (error instanceof GlobalSessionDiscoveryError) {
+        return fail(
+          "GlobalSessionDiscoveryUnavailable",
+          "Global session discovery is unavailable from this OpenCode runtime.",
+          "Retry with scope: 'local', or run Mission Control in the directory that owns the target session.",
+        )
+      }
+
+      await adapter.debug("listSessions failed", {
+        scope,
+        error: error instanceof Error ? error.message : String(error),
+      })
+
+      return fail(
+        "SessionLookupUnavailable",
+        "Session list failed.",
+        "Retry after the runtime settles.",
       )
     }
   }
@@ -692,6 +744,31 @@ export class MissionControlSessionService {
     return extractParentSessionID(session) ?? this.state.metadataForSession(sessionId)?.parentSessionId
   }
 
+  private checkPeerMessagingGuard(
+    targetSessionId: string,
+    targetSession: unknown,
+    fromSessionId: string | undefined,
+  ): ToolResult<SessionSendResult> | undefined {
+    const targetParentId = this.getParentSessionId(targetSessionId, targetSession)
+    if (!targetParentId) {
+      // Target is a root session — always allowed
+      return undefined
+    }
+
+    const senderParentId = fromSessionId
+      ? this.state.metadataForSession(fromSessionId)?.parentSessionId
+      : undefined
+
+    // Peer check: sender and target share the same parent
+    if (senderParentId && senderParentId === targetParentId) {
+      return undefined
+    }
+
+    // Specific rejection: target IS the sender's own parent
+    const isTargetSenderParent = fromSessionId !== undefined && targetSessionId === senderParentId
+    return rejectNonPeerPrompt(targetSessionId, targetParentId, isTargetSenderParent)
+  }
+
   private async buildTree(
     adapter: OpenCodeAdapter,
     sessionId: string,
@@ -854,11 +931,15 @@ const escapeXmlText = (value: string) => value.replace(/&/g, "&amp;").replace(/<
 
 const escapeXmlAttribute = (value: string) => escapeXmlText(value).replace(/"/g, "&quot;")
 
-const rejectChildSessionPrompt = (targetSessionId: string, parentSessionId: string) =>
+const rejectNonPeerPrompt = (targetSessionId: string, targetParentId: string, isTargetSenderParent: boolean) =>
   fail(
     "SubagentPromptRejected",
-    `Session '${targetSessionId}' is a child/subagent session (parent '${parentSessionId}') and Mission Control refuses to prompt it directly.`,
-    `Send the message to parent session '${parentSessionId}' if you intend to steer orchestration, or use mc_session_abort({ sessionId: '${targetSessionId}' }) to stop the child session.`,
+    isTargetSenderParent
+      ? `Session '${targetSessionId}' is your calling/parent session.`
+      : `Session '${targetSessionId}' is a subagent (parent '${targetParentId}') but is not a peer of the sender.`,
+    isTargetSenderParent
+      ? "To return a result to your calling agent, finish and end your loop. Results auto-return to the parent."
+      : `Peer messaging is only supported between sibling subagents (same parent). Use subagent_abort({ sessionId: '${targetSessionId}' }) to cancel this session instead.`,
   )
 
 const buildInterAgentMessage = ({ fromSessionId, text }: { fromSessionId?: string; text: string }) =>
